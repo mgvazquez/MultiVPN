@@ -394,8 +394,15 @@ function unifiedStatusScript() {
     '    END { flush() }\');',
     'fi;',
 
-    // GlobalProtect owns no unit and no name, so it gets whatever tunnel device
-    // nothing else has claimed.
+    // GlobalProtect owns no unit, so it gets whatever tunnel device nothing
+    // else has claimed. It does have a name now: the connect script writes a
+    // header per attempt to its log, which is the only place the portal is
+    // recorded — gpclient redacts host names in its own.
+    //
+    // A tunnel brought up outside the widget leaves the previous header
+    // standing, so the name can be the last one this widget connected rather
+    // than the one actually up. An approximate name beats none: it is what
+    // lets the row be matched, and a row is what can be switched off.
     'pid=$(pgrep -x gpclient 2>/dev/null | head -1);',
     '[ -z "$pid" ] && pid=$(pgrep -x gpservice 2>/dev/null | head -1);',
     'if [ -n "$pid" ]; then',
@@ -406,7 +413,10 @@ function unifiedStatusScript() {
     '  et=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d "[:space:]");',
     '  gs="";',
     '  [ -n "$et" ] && gs=$(( $(date +%s) - et ));',
-    '  emit globalprotect process "" "$gi" "$gs" "";',
+    '  gn="";',
+    '  gl="${XDG_STATE_HOME:-$HOME/.local/state}/multivpn/gpclient.log";',
+    '  [ -r "$gl" ] && gn=$(grep -a "^==== " "$gl" | tail -1 | awk \'{print $4}\');',
+    '  emit globalprotect process "$gn" "$gi" "$gs" "";',
     'fi'
   ].join(" "))
 }

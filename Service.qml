@@ -161,6 +161,32 @@ Item {
       for (var i = 0; i < out.length; i++)
         if (out[i].backend === "globalprotect") out[i].state = "active"
     }
+
+    // A tunnel the panel is showing has to be something the panel can take
+    // down, and the only switch is the one on a row. A GlobalProtect
+    // connection whose portal was removed, or that was brought up from a
+    // terminal, matched no row at all — the header said CONNECTED and there
+    // was nothing to click.
+    if (activeBackend === "globalprotect" && activeOrigin === "process") {
+      var listed = false
+      for (var j = 0; j < out.length; j++)
+        if (out[j].backend === "globalprotect" && out[j].state === "active") listed = true
+      if (!listed)
+        out.push({
+          backend: "globalprotect",
+          origin: "process",
+          // Unnamed when the log is gone or the tunnel came from elsewhere.
+          // The label is all the name is for here: disconnecting is
+          // `gpclient disconnect`, which takes no argument.
+          name: activeName !== "" ? activeName : "GlobalProtect",
+          remote: activeName,
+          port: "",
+          proto: "gp",
+          hasAuth: true,
+          state: "active",
+          autostart: false
+        })
+    }
     return out
   }
 

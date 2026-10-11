@@ -241,9 +241,13 @@ uptime, throughput) attach to that row like any other.
 | openvpn3 configuration manager | OpenVPN 3 configs, read live via `openvpn3 configs-list` |
 | `~/.local/state/multivpn/portals.json` | GlobalProtect portals, owned by you, plain host names |
 
-One known gap: `gpclient` redacts host names in its own log, so when more than
-one portal is configured the widget cannot tell which one is connected. It
-reports GlobalProtect as connected without marking a row.
+`gpclient` redacts host names in its own log, so the portal a tunnel belongs to
+is read from the widget's own log instead, where the connect script records it
+per attempt. A tunnel brought up outside the widget leaves the previous entry
+standing, so the name can be the last one connected from here rather than the
+one actually up — and a tunnel that matches no portal at all still gets a row,
+because a connection the panel reports has to be one the panel can switch
+off.
 
 ## GlobalProtect and DNS
 
