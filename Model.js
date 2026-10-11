@@ -917,7 +917,15 @@ function gpConnectScript(raw, dnsWrapper, logPath) {
     '{ printf "\n==== %s %s ====\n" "$(date "+%F %T")" ' + shellQuote(e.host) + '; } >> ' + log + ';',
     // Detached on purpose: the tunnel outlives this script, and the panel reads
     // the log rather than the pipe.
-    '{ printf "%s\n" "$pass" | pkexec' + args + ' >> ' + log + ' 2>&1; } &',
+    //
+    // The redirections are what make it detached rather than merely
+    // backgrounded. Every script here is wrapped in `| head -c`, so the group
+    // inherits the write end of that pipe — and a background job holding it
+    // for the life of the tunnel means head never sees EOF, the pipeline never
+    // finishes, and the Process never exits. The panel then sits on
+    // "Connecting…" with the tunnel up, and never reports a failure either,
+    // because the handler that would say so waits on the same pipe.
+    '{ printf "%s\n" "$pass" | pkexec' + args + ' >> ' + log + ' 2>&1; } </dev/null >/dev/null 2>&1 &',
     'pid=$!;',
     // Up, failed, or still trying — decided by the log and the device, because
     // gpclient has no status command to ask.
