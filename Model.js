@@ -58,9 +58,10 @@ function capped(script) {
 // disconnecting, and enumerating profiles — so a backend is described by what
 // it can do and by the script that reports its state.
 //
-// GlobalProtect is deliberately the thin one. gpclient has no status command,
-// no systemd unit and an interactive SSO login, so the widget watches it and
-// can take it down, but cannot own bringing it up.
+// GlobalProtect driven by gpclient is deliberately the thin one: no status
+// command, no systemd unit and an interactive SSO login, so the widget watches
+// it and can take it down, but cannot own bringing it up. The same portal as a
+// NetworkManager connection is not thin at all — see ORIGIN_CAPS below.
 
 var BACKENDS = {
   // One widget for everything on the machine. Capabilities here are the union;
@@ -130,6 +131,23 @@ var BACKENDS = {
   }
 }
 
+// GlobalProtect is the one backend whose capabilities depend on where the row
+// came from. Driven by gpclient it is the thin case above. The same portal as
+// a NetworkManager connection — service-type openconnect, protocol gp — is a
+// full citizen: NM owns the tunnel, so it lists, connects, disconnects and
+// autostarts exactly like the OpenVPN and WireGuard connections it sits next
+// to, and unlike gpclient it can present a client certificate.
+var ORIGIN_CAPS = {
+  "globalprotect/nm": {
+    canList: true,
+    canAutostart: true,
+    // Still nothing to store: the cookie is NOT_SAVED by construction and the
+    // certificate lives in the connection, so every connect authenticates.
+    canCredentials: false,
+    connectNeedsTerminal: false
+  }
+}
+
 function backend(name) {
   return BACKENDS[name] || BACKENDS.openvpn
 }
@@ -140,8 +158,14 @@ function backendNames() {
 
 // In unified mode every row can come from a different backend, so controls are
 // decided per row rather than per widget.
-function capsFor(profileBackend) {
-  return BACKENDS[profileBackend] || BACKENDS.openvpn
+function capsFor(profileBackend, origin) {
+  var base = BACKENDS[profileBackend] || BACKENDS.openvpn
+  var over = ORIGIN_CAPS[profileBackend + "/" + (origin || "")]
+  if (!over) return base
+  var merged = {}
+  for (var k in base) merged[k] = base[k]
+  for (var j in over) merged[j] = over[j]
+  return merged
 }
 
 function backendBadge(profile) {
@@ -281,6 +305,18 @@ function unifiedStatusScript() {
     'tunnels() { { ip -brief link show type ovpn; ip -brief link show type tun; } 2>/dev/null |',
     '  awk \'{ sub(/@.*/, "", $1); print $1 }\'; };',
 
+    // A NetworkManager VPN connection reports its PARENT device, not its
+    // tunnel: GENERAL.DEVICES and GENERAL.IP-IFACE both name the wifi or
+    // ethernet the tunnel runs over. Reading address, MTU, routes and
+    // throughput off that describes the underlying link rather than the VPN —
+    // an active tunnel showed the wifi's own address. IP4.ADDRESS is the
+    // tunnel's, and the interface carrying that address is the tunnel.
+    'nmvpn_iface() {',
+    '  na=$(nmcli -g IP4.ADDRESS connection show "$1" 2>/dev/null | head -1 | cut -d/ -f1);',
+    '  [ -z "$na" ] && return 0;',
+    '  ip -4 -o addr show 2>/dev/null | awk -v a="$na" \'$4 ~ "^"a"/" { print $2; exit }\';',
+    '};',
+
     // Which interface one OpenVPN instance opened. Only its journal says, and
     // it says it two ways: the in-kernel DCO driver logs "net_iface_new: add
     // ovpn0", the ordinary tun driver logs "TUN/TAP device tun0 opened".
@@ -345,12 +381,23 @@ function unifiedStatusScript() {
     '    n=${escaped//"$bs"/};',
     '    if [ "$t" = vpn ]; then',
     '      st=$(nmcli -g vpn.service-type connection show "$n" 2>/dev/null);',
-    '      case "$st" in *openvpn) ;; *) continue;; esac;',
-    '      b=openvpn;',
+    '      case "$st" in',
+    '        *openvpn) b=openvpn;;',
+    // openconnect speaks several protocols; only gp is GlobalProtect. The
+    // others (anyconnect, pulse, fortinet, f5) would need their own labels and
+    // are left where they were — unlisted — rather than mislabelled.
+    '        *openconnect)',
+    '          case "$(nmcli -g vpn.data connection show "$n" 2>/dev/null)" in',
+    '            *"protocol = gp"*) b=globalprotect;;',
+    '            *) continue;;',
+    '          esac;;',
+    '        *) continue;;',
+    '      esac;',
+    '      d=$(nmvpn_iface "$n");',
     '    else',
     '      b=wireguard;',
+    '      d=$(nmcli -g GENERAL.DEVICES connection show "$n" 2>/dev/null | head -1);',
     '    fi;',
-    '    d=$(nmcli -g GENERAL.DEVICES connection show "$n" 2>/dev/null | head -1);',
     '    s=$(nmcli -g connection.timestamp connection show "$n" 2>/dev/null);',
     '    a=$(nmcli -g connection.autoconnect connection show "$n" 2>/dev/null);',
     '    [ "$a" = yes ] && e=enabled || e=disabled;',
@@ -456,6 +503,11 @@ function availabilityScript() {
     '  [ -e "$f" ] && plug=1;',
     'done;',
     'printf "nmopenvpn=%s\\n" "$plug";',
+    'plugoc=0;',
+    'for f in /usr/lib/NetworkManager/VPN/nm-openconnect-service.name /usr/lib64/NetworkManager/VPN/nm-openconnect-service.name; do',
+    '  [ -e "$f" ] && plugoc=1;',
+    'done;',
+    'printf "nmopenconnect=%s\\n" "$plugoc";',
     'printf "globalprotect=%s\\n" "$(have gpclient)";',
     'printf "zenity=%s\\n" "$(have zenity)"'
   ].join(" "))
@@ -467,7 +519,7 @@ function availabilityLabel(av) {
   if (av.openvpn === "1" || av.nmopenvpn === "1") found.push("OpenVPN")
   if (av.openvpn3 === "1") found.push("OpenVPN 3")
   if (av.wgquick === "1" || av.nmcli === "1") found.push("WireGuard")
-  if (av.globalprotect === "1") found.push("GlobalProtect")
+  if (av.globalprotect === "1" || av.nmopenconnect === "1") found.push("GlobalProtect")
   if (found.length === 0) return "no VPN tooling found"
   return found.join(" · ") + " available"
 }
@@ -588,8 +640,21 @@ function nmListScript() {
     '    continue;',
     '  fi;',
     '  st=$(nmcli -g vpn.service-type connection show "$n" 2>/dev/null);',
-    '  case "$st" in *openvpn) ;; *) continue;; esac;',
     '  data=$(nmcli -g vpn.data connection show "$n" 2>/dev/null);',
+    '  case "$st" in',
+    '    *openvpn) ;;',
+    // GlobalProtect through networkmanager-openconnect. The gateway field
+    // doubles as the login path: openconnect(1) documents --usergroup=X as
+    // identical to https://host/X, and the plugin has no usergroup key of its
+    // own, so "host/gateway" is how a connection goes straight to the gateway
+    // instead of authenticating twice. The host is what belongs in the list.
+    '    *openconnect)',
+    '      case "$data" in *"protocol = gp"*) ;; *) continue;; esac;',
+    '      gw=$(vpn_get gateway "$data"); gw=${gw//"$bs"/};',
+    '      printf "gp\\t%s\\t%s\\n" "$n" "${gw%%/*}";',
+    '      continue;;',
+    '    *) continue;;',
+    '  esac;',
     // networkmanager-openvpn stores "host\:port" in remote and often omits
     // a separate port key. static-challenge itself may be absent; the
     // challenge-response-flags=2 bit is what means "ask every time".
@@ -634,6 +699,23 @@ function parseNmProfiles(raw) {
       })
       continue
     }
+    if (parts[0] === "gp") {
+      if (!parts[1]) continue
+      out.push({
+        backend: "globalprotect",
+        origin: "nm",
+        name: parts[1],
+        remote: String(parts[2] || ""),
+        port: "443",
+        proto: "gp",
+        hasAuth: true,
+        // cookie, gateway, gwcert and resolve are all NOT_SAVED — they are the
+        // result of authenticating against the portal, not configuration — so
+        // a GlobalProtect connection asks every single time, by construction.
+        needsAsk: true
+      })
+      continue
+    }
     if (parts[0] !== "wg" || !parts[1]) continue
     var endpoint = String(parts[2] || "")
     var host = endpoint, port = ""
@@ -651,6 +733,97 @@ function parseNmProfiles(raw) {
     })
   }
   return out
+}
+
+// ── NetworkManager VPN secrets ─────────────────────────────────────────────
+//
+// Some VPN secrets are not configuration at all. openconnect's cookie, gateway,
+// gwcert and resolve are the *result* of authenticating against the portal, so
+// the plugin stores them NOT_SAVED and NetworkManager asks a session secret
+// agent for them at every single connect. Omarchy ships no agent — quickshell
+// does not implement one — and nmcli without a TTY cannot prompt either, which
+// is why connecting used to hand off to a terminal running `nmcli --ask`.
+//
+// For GlobalProtect a terminal cannot do the job at all: the login is a window
+// that presents a client certificate and talks to the portal over mutual TLS.
+// What can do it is the plugin's own auth dialog — the same binary nm-applet
+// runs. So this does what the applet does, and only for the length of the
+// login: run the dialog, speak the libnm protocol at it
+// (nm_vpn_service_plugin_read_vpn_details), hand the answers to nmcli.
+//
+//   us     -> dialog : DATA_KEY=k / DATA_VAL=v / <blank> ... / DONE
+//   dialog -> us     : k / v / ... / <blank>
+//   us     -> dialog : QUIT
+//
+// Nothing is persisted. The secrets reach nmcli through a passwd-file in
+// $XDG_RUNTIME_DIR created with umask 077 and removed as soon as nmcli has read
+// it; the next connect authenticates again, which is the whole point of
+// NOT_SAVED. The dialog is located the way the applet locates it, from the
+// .name file that claims the connection's service-type, so this stays generic
+// across VPN plugins rather than hardcoding a path.
+//
+// Exit status: 2 means no auth dialog is installed for this plugin and 3 means
+// the login was dismissed; the caller tells those apart from a real failure.
+function nmAuthDialogScript(name) {
+  var q = shellQuote(name)
+  return capped([
+    'n=' + q + ';',
+    'uuid=$(nmcli -g connection.uuid connection show "$n" 2>/dev/null) || exit 1;',
+    'svc=$(nmcli -g vpn.service-type connection show "$n" 2>/dev/null);',
+    '[ -n "$uuid" ] && [ -n "$svc" ] || exit 1;',
+
+    'dlg="";',
+    'for f in /usr/lib/NetworkManager/VPN/*.name /usr/lib64/NetworkManager/VPN/*.name; do',
+    '  [ -e "$f" ] || continue;',
+    '  grep -qx "service=$svc" "$f" 2>/dev/null || continue;',
+    '  d=$(sed -n "s/^auth-dialog=//p" "$f" | head -1);',
+    '  if [ -n "$d" ] && [ -x "$d" ]; then dlg=$d; break; fi;',
+    'done;',
+    '[ -n "$dlg" ] || exit 2;',
+
+    'coproc DLG { "$dlg" --uuid "$uuid" --name "$n" --service "$svc" --allow-interaction; };',
+    // bash closes a coproc's descriptors inside any subshell, and the pipeline
+    // feeding the dialog below is one. Duplicating them to descriptors of our
+    // own is what survives that; without it the first write is EBADF.
+    'exec {CIN}>&"${DLG[1]}" {COUT}<&"${DLG[0]}";',
+
+    // vpn.data comes back as "k = v, k = v". The same ", " split the profile
+    // listing above already relies on; no value NetworkManager writes for these
+    // plugins contains one.
+    'nmcli -g vpn.data connection show "$n" 2>/dev/null | tr "," "\\n" |',
+    '  while IFS= read -r pair; do',
+    '    k=${pair%%=*}; v=${pair#*=};',
+    '    k=${k// /}; v=${v# }; v=${v% };',
+    '    [ -n "$k" ] && printf "DATA_KEY=%s\\nDATA_VAL=%s\\n\\n" "$k" "$v";',
+    '  done >&"$CIN";',
+    'printf "DONE\\n\\n" >&"$CIN";',
+
+    'pf=$(umask 077; mktemp "${XDG_RUNTIME_DIR:-/tmp}/multivpn-secrets.XXXXXX") || exit 1;',
+    'got=0;',
+    'while IFS= read -r k <&"$COUT"; do',
+    '  [ -z "$k" ] && break;',
+    '  IFS= read -r v <&"$COUT" || break;',
+    // Two guards, and both are about the file staying parseable rather than
+    // about trust. A key outside this shape is not a secret nmcli can set, and
+    // openconnect's dialog also returns bulk connection data — xmlconfig is the
+    // portal's whole XML — which belongs to the applet's "remember this"
+    // behaviour, not to a one-shot login, and would be the one value large
+    // enough to care about.
+    '  case "$k" in ""|[!a-z]*|*[!a-z0-9_-]*) continue;; esac;',
+    '  [ "${#v}" -gt 2048 ] && continue;',
+    '  printf "vpn.secrets.%s:%s\\n" "$k" "$v" >> "$pf";',
+    '  got=$((got + 1));',
+    'done;',
+    'printf "QUIT\\n\\n" >&"$CIN" 2>/dev/null;',
+    'exec {CIN}>&- {COUT}<&-;',
+    'wait "$DLG_PID" 2>/dev/null;',
+
+    '[ "$got" = 0 ] && { rm -f "$pf"; exit 3; };',
+    'nmcli connection up "$n" passwd-file "$pf";',
+    'rc=$?;',
+    'rm -f "$pf";',
+    'exit "$rc"'
+  ].join(" "))
 }
 
 function nmSecretsNeeded(text) {

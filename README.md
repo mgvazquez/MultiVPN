@@ -66,6 +66,7 @@ omarchy bar set io.github.nepomuk-software.multivpn profile home
 | **OpenVPN** (`openvpn-client@` and NetworkManager) | yes | `/etc/openvpn/client` + `nmcli` | yes | yes | systemd: stored; NM: prompt at connect |
 | **OpenVPN 3** (`openvpn3` D-Bus session manager) | yes | `openvpn3 configs-list` | no | yes | asked at session start — SSO opens the browser |
 | **WireGuard** (`wg-quick@` and NetworkManager) | yes | `/etc/wireguard` + `nmcli` | yes | yes | n/a — keys live in the config |
+| **GlobalProtect** (NetworkManager, `openconnect`) | yes | `nmcli` | yes | no | asked at connect — certificate, user and password |
 | **GlobalProtect** (`gpclient`) | disconnect yes, connect hands off | no | no | no | n/a — SSO |
 
 Unified mode reports **every** connection that is up, not just one. Split-tunnel
@@ -88,17 +89,29 @@ connected. It stops watching after ~120 s but leaves the session standing, so
 finishing the login late still connects. Autostart is off for now —
 `openvpn3-session@` units want root-owned persistent configs.
 
-GlobalProtect is deliberately the thin one. `gpclient` has no status command,
-no systemd unit and an interactive SSO login, so the widget watches it, can take
-it down, and hands connecting to a terminal or the vendor GUI. Everything that
-comes off the tunnel interface — address, routes, uptime, throughput — works the
-same for all four.
+GlobalProtect comes two ways, and they are not equally thin. `gpclient` has no
+status command, no systemd unit and an interactive SSO login, so for those
+portals the widget watches, can take the tunnel down, and hands connecting to a
+terminal or the vendor GUI.
+
+The same portal as a **NetworkManager connection** — `vpn.service-type`
+openconnect, `protocol = gp` — is a full row instead: listed, connected,
+disconnected and autostarted through `nmcli`, exactly like the OpenVPN and
+WireGuard connections next to it. That path also reaches portals `gpclient`
+cannot, because it has no certificate option at all: `openconnect` presents a
+client certificate at the TLS layer of every request, so a portal that wants
+certificate **and** password — two independent factors, not alternatives — works
+here and nowhere else.
+
+Connecting one does need the plugin's own login window; see *Secrets that cannot
+be stored* below. Everything that comes off the tunnel interface — address,
+routes, uptime, throughput — works the same for all of them.
 
 ## Requirements
 
 | Needs | Why |
 |---|---|
-| one of: `openvpn`, `openvpn3` (openvpn3-linux), `wireguard-tools` (for `wg-quick@`), NetworkManager ≥ 1.16 (for WireGuard connections), `networkmanager-openvpn` (for OpenVPN connections in NetworkManager), `globalprotect-openconnect` | whichever backend you use |
+| one of: `openvpn`, `openvpn3` (openvpn3-linux), `wireguard-tools` (for `wg-quick@`), NetworkManager ≥ 1.16 (for WireGuard connections), `networkmanager-openvpn` (for OpenVPN connections in NetworkManager), `networkmanager-openconnect` (for GlobalProtect in NetworkManager), `globalprotect-openconnect` | whichever backend you use |
 | `bash`, `systemctl`, `ip`, `journalctl`, `cat` | reading status, addresses, routes and the connection log |
 | membership in a group that can read the system journal (usually `wheel`) | server endpoint and cipher come from the journal |
 | `zenity` | the file dialog for importing a config — optional, the path can also be pasted |
@@ -202,11 +215,10 @@ unprivileged ones are offered first:
   unit has no tty to type one into, and stored credentials cannot hold a
   code that rotates. Equivalent by hand:
   `nmcli connection import type openvpn file client.ovpn`
-  Connecting uses `nmcli connection up`. If the profile needs a challenge
-  or the session has no NetworkManager secret agent — Omarchy does not ship
-  one — the widget opens a terminal with `nmcli --ask` so you can type it.
-  Autostart is NetworkManager's own flag; on a challenge profile it will
-  fail at boot with nothing to type into.
+  Connecting uses `nmcli connection up`; anything that has to be asked goes
+  through the plugin's own login window, below. Autostart is NetworkManager's
+  own flag; on a profile that asks every time it will fail at boot with
+  nothing to type into.
 - **OpenVPN 3** — imports into the per-user session manager. No root helper.
   Web-based auth opens the browser, as before.
 - **openvpn-client@** — installs into `/etc/openvpn/client`. Needs the root
@@ -222,13 +234,38 @@ uptime, throughput) attach to that row like any other.
 | Path | What |
 |---|---|
 | `/var/lib/multivpn/profiles.json` | OpenVPN and `wg-quick` profiles, written by the helper |
-| NetworkManager | WireGuard and OpenVPN connections, read live via `nmcli` |
+| NetworkManager | WireGuard, OpenVPN and GlobalProtect connections, read live via `nmcli` |
 | openvpn3 configuration manager | OpenVPN 3 configs, read live via `openvpn3 configs-list` |
 | `~/.local/state/multivpn/portals.json` | GlobalProtect portals, owned by you, plain host names |
 
-One known gap: `gpclient` redacts host names in its own log, so when more than
-one portal is configured the widget cannot tell which one is connected. It
-reports GlobalProtect as connected without marking a row.
+One known gap, and it is `gpclient`'s alone: it redacts host names in its own
+log, so when more than one portal is configured the widget cannot tell which one
+is connected. It reports GlobalProtect as connected without marking a row.
+NetworkManager connections have names, so they do not have this problem.
+
+## Secrets that cannot be stored
+
+Some VPN secrets are not configuration. openconnect's `cookie`, `gateway`,
+`gwcert` and `resolve` are the *result* of authenticating against the portal, so
+the plugin marks them `NOT_SAVED` and NetworkManager asks a session secret agent
+for them at every connect. Omarchy ships no agent — quickshell does not
+implement one — and `nmcli` without a terminal cannot prompt either.
+
+So the widget does what `nm-applet` would do, and only for the length of the
+login: it runs the VPN plugin's own auth dialog — found through the `auth-dialog`
+entry of the `.name` file that claims the connection's service type, so no path
+is hardcoded — speaks the libnm protocol at it, and hands the answers to `nmcli`
+through a `passwd-file` in `$XDG_RUNTIME_DIR` created with `umask 077` and
+deleted as soon as `nmcli` has read it.
+
+Nothing is persisted; the next connect authenticates again, which is the point
+of `NOT_SAVED`. A plugin that ships no auth dialog still falls back to a
+terminal running `nmcli --ask`, which is what every NetworkManager profile did
+before. Dismissing the login window leaves the row down and reports nothing as
+an error.
+
+For GlobalProtect this is not a nicety: the dialog is the only thing that
+presents a client certificate, so a terminal could not do the job at all.
 
 ## Usage
 

@@ -1312,7 +1312,8 @@ Panel {
     readonly property var profile: modelData
     // In unified mode each row can come from a different backend, so the
     // controls are decided here rather than for the widget as a whole.
-    readonly property var rowCaps: Model.capsFor(profile ? profile.backend : "")
+    readonly property var rowCaps: Model.capsFor(profile ? profile.backend : "",
+                                                 profile ? profile.origin : "")
     property bool hasCursor: false
     readonly property alias hovered: rowMouse.containsMouse
     readonly property bool isCurrent: profile && profile.name === vpn.profile

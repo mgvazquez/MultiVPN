@@ -157,9 +157,11 @@ Item {
     // gpclient redacts host names in its log, so with several portals
     // configured there is no way to tell which one is up. Mark none rather
     // than guess — the header still reports that GlobalProtect is connected.
-    if (activeBackend === "globalprotect" && portals.length === 1) {
+    if (activeBackend === "globalprotect" && activeOrigin === "process"
+        && portals.length === 1) {
       for (var i = 0; i < out.length; i++)
-        if (out[i].backend === "globalprotect") out[i].state = "active"
+        if (out[i].backend === "globalprotect" && out[i].origin === "process")
+          out[i].state = "active"
     }
     return out
   }
@@ -185,7 +187,8 @@ Item {
     if (!availabilityProc.running) availabilityProc.running = true
     if (!caps.canList) return
     if (!cacheProc.running) cacheProc.running = true
-    if ((filterBackend === "" || filterBackend === "wireguard" || filterBackend === "openvpn")
+    if ((filterBackend === "" || filterBackend === "wireguard" || filterBackend === "openvpn"
+         || filterBackend === "globalprotect")
         && !nmListProc.running)
       nmListProc.running = true
     if ((filterBackend === "" || filterBackend === "openvpn3") && !ovpn3ListProc.running)
@@ -202,14 +205,15 @@ Item {
   // The bar's right-click needs one obvious target when nothing is up. The
   // `profile` setting is that favourite.
   function favourite() {
-    // GlobalProtect has no listable profiles, so the configured portal stands
-    // in for one.
-    if (backendName === "globalprotect")
-      return profile ? { backend: "globalprotect", origin: "process",
-                         name: profile, state: "inactive" } : null
     if (!profile) return null
     for (var i = 0; i < profiles.length; i++)
       if (profiles[i].name === profile) return profiles[i]
+    // A gpclient portal is in no list — it has no registry to be listed from —
+    // so the configured one stands in for a profile. A NetworkManager
+    // GlobalProtect connection was found in the loop above like any other.
+    if (backendName === "globalprotect")
+      return { backend: "globalprotect", origin: "process",
+               name: profile, state: "inactive" }
     return null
   }
 
@@ -224,15 +228,22 @@ Item {
   }
 
   function connectProfile(p) {
-    if (p.backend === "globalprotect") { launchGlobalProtect(p.name); return }
+    // A GlobalProtect portal driven by gpclient cannot be brought up from
+    // here; the same portal as a NetworkManager connection can, and goes
+    // through nmcli like everything else NM owns.
+    if (p.backend === "globalprotect" && p.origin !== "nm") {
+      launchGlobalProtect(p.name)
+      return
+    }
     if (p.backend === "openvpn3") { connectOvpn3(p.name); return }
     lastAttemptName = p.name
     lastAttemptOrigin = p.origin || ""
-    // static-challenge and "ask every time" secrets have no stored value.
-    // nmcli without a TTY cannot prompt; a session secret agent may, but
-    // Omarchy does not ship one, so this hands off to a terminal with --ask.
-    if (p.origin === "nm" && p.backend === "openvpn" && p.needsAsk) {
-      connectNmAsk(p.name)
+    // static-challenge and "ask every time" secrets have no stored value, and
+    // openconnect's cookie never does — it is the result of the login, not
+    // configuration. nmcli without a TTY cannot prompt, so the plugin's own
+    // auth dialog does the asking.
+    if (p.origin === "nm" && p.needsAsk) {
+      connectNmSecrets(p.name)
       return
     }
     intent = "up"
@@ -264,6 +275,24 @@ Item {
   }
 
   function disconnect() { disconnectActive() }
+
+  // The plugin's own auth dialog asks for whatever NetworkManager could not
+  // store — see Model.nmAuthDialogScript. It is what nm-applet would run, and
+  // the only thing that can present a client certificate, so it is tried
+  // first; a plugin that ships no dialog still falls back to the terminal.
+  function connectNmSecrets(name) {
+    intent = "up"
+    actionStatus = "Waiting for the VPN login…"
+    lastError = ""
+    lastAttemptFailed = false
+    lastAttemptName = name
+    lastAttemptOrigin = "nm"
+    nmAskPending = false
+    nmAskTimer.stop()
+    nmSecrets.profileName = name
+    nmSecrets.command = ["bash", "-lc", Model.nmAuthDialogScript(name)]
+    nmSecrets.running = true
+  }
 
   function connectNmAsk(name) {
     if (!bar) {
@@ -311,7 +340,7 @@ Item {
 
   // One place that knows how each backend is actually switched.
   function commandFor(forBackend, useOrigin, name, direction) {
-    if (forBackend === "globalprotect")
+    if (forBackend === "globalprotect" && useOrigin !== "nm")
       return ["pkexec", "gpclient", "disconnect"]
 
     // Only disconnect comes through here for openvpn3 — see connectOvpn3.
@@ -332,8 +361,9 @@ Item {
 
   function setAutostart(name, useOrigin, on, forBackend) {
     var target = forBackend || backendName
-    if (target === "globalprotect") return
-    // NetworkManager keeps its own autoconnect flag; no helper involved.
+    // NetworkManager keeps its own autoconnect flag, for every backend it
+    // owns; no helper involved. gpclient has no unit to enable.
+    if (useOrigin !== "nm" && target === "globalprotect") return
     if (useOrigin === "nm") {
       unprivAction.label = "autostart"
       unprivAction.command = ["nmcli", "connection", "modify", name,
@@ -703,7 +733,7 @@ Item {
       var why = Model.clamp(stderr.text, Model.MAX_FIELD).trim()
       if (code !== 0 && wasUp && root.lastAttemptOrigin === "nm"
           && Model.nmSecretsNeeded(why)) {
-        connectNmAsk(root.lastAttemptName)
+        root.connectNmSecrets(root.lastAttemptName)
         return
       }
       root.intent = ""
@@ -751,6 +781,33 @@ Item {
   // journal probe below is OpenVPN 2's and stays out of this path. On
   // timeout the session is left standing, so a browser login finished late
   // still connects and the status probe picks it up.
+  Process {
+    id: nmSecrets
+    property string profileName: ""
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(code) {
+      // 2: this plugin ships no auth dialog, so the terminal is still the way
+      // in. 3: the login window was dismissed, which is not a failure to
+      // report — the row simply stays down.
+      if (code === 2) { root.connectNmAsk(profileName); return }
+      root.intent = ""
+      root.actionStatus = ""
+      root.refresh()
+      if (code === 0) {
+        root.lastError = ""
+        root.refreshDetails()
+        root.actionFinished("unit", true, "connected")
+      } else if (code === 3) {
+        root.actionFinished("unit", false, "login cancelled")
+      } else {
+        root.lastAttemptFailed = true
+        var why = Model.clamp(stderr.text, Model.MAX_FIELD).trim()
+        root.lastError = "Connection failed" + (why ? ": " + why : "")
+        root.actionFinished("unit", false, "connection failed")
+      }
+    }
+  }
+
   Process {
     id: ovpn3Connect
     stderr: StdioCollector { waitForEnd: true }
