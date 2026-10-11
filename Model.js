@@ -882,6 +882,48 @@ function nmImportScript(path, name, kind) {
   ].join(" "))
 }
 
+// The connect that needs no terminal.
+//
+// gpclient runs in the foreground for the life of the tunnel and writes its log
+// to stdout, so a terminal could either show the password prompts or capture
+// the log, not both. Answering both prompts without a tty is what removes it:
+// pkexec raises the polkit dialog for root, and --passwd-on-stdin takes the
+// portal password from this script's own stdin, which is where the panel wrote
+// it. Neither password is ever an argument, so neither appears in /proc.
+//
+// The tunnel is left running detached with its output appended to a log. The
+// script returns as soon as gpclient is up or has failed, so the panel can say
+// which without waiting out the session.
+function gpConnectScript(raw, dnsWrapper, logPath) {
+  var e = portalEntry(raw)
+  if (!e) return "exit 1"
+  var args = gpArgs(raw, dnsWrapper, true)
+  var log = shellQuote(logPath)
+
+  return capped([
+    'read -r pass || true;',
+    'mkdir -p "$(dirname ' + log + ')" || exit 1;',
+    'umask 077;',
+    '{ printf "\n==== %s %s ====\n" "$(date "+%F %T")" ' + shellQuote(e.host) + '; } >> ' + log + ';',
+    // Detached on purpose: the tunnel outlives this script, and the panel reads
+    // the log rather than the pipe.
+    '{ printf "%s\n" "$pass" | pkexec' + args + ' >> ' + log + ' 2>&1; } &',
+    'pid=$!;',
+    // Up, failed, or still trying — decided by the log and the device, because
+    // gpclient has no status command to ask.
+    'for i in $(seq 1 120); do',
+    '  if ! kill -0 "$pid" 2>/dev/null; then',
+    '    tail -n 20 ' + log + ' | grep -iE "error|denied|invalid|failed" | tail -n 3 >&2;',
+    '    exit 1;',
+    '  fi;',
+    '  if grep -q "Connected to VPN" ' + log + ' 2>/dev/null; then exit 0; fi;',
+    '  sleep 1;',
+    'done;',
+    'echo "timed out waiting for the tunnel" >&2;',
+    'exit 1'
+  ].join(" "))
+}
+
 function mergeProfiles(cached, nmProfiles, stateRaw, backendName) {
   var states = parseKeyValues(stateRaw)
   var all = (cached || []).concat(nmProfiles || [])

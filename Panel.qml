@@ -50,6 +50,8 @@ Panel {
   // It holds enough now that closeForms and the Escape handler have to see it.
   property string portalHost: ""
   property string portalUser: ""
+  // Which portal is waiting for its password. The value is never kept.
+  property string gpPasswordHost: ""
   property string portalCert: ""
   property string portalKey: ""
   property bool portalGateway: false
@@ -153,6 +155,7 @@ Panel {
     removeBackend = ""
     importKind = ""
     importTarget = ""
+    gpPasswordHost = ""
     portalHost = ""
     portalUser = ""
     portalCert = ""
@@ -193,6 +196,12 @@ Panel {
 
   Connections {
     target: vpn
+    function onPasswordNeeded(host) {
+      root.closeForms()
+      root.gpPasswordHost = host
+      root.open()
+    }
+
     function onActionFinished(command, ok, message) {
       if (command === "pick" && ok) {
         // Suggested profile name: file name without extension, sanitised.
@@ -345,7 +354,8 @@ Panel {
       onCloseRequested: {
         // Escape backs out of an open form first, then out of the panel.
         if (root.importPath !== "" || root.credentialsProfile !== ""
-          || root.removeTarget !== "" || root.portalHost !== "")
+          || root.removeTarget !== "" || root.portalHost !== ""
+          || root.gpPasswordHost !== "")
           root.closeForms()
         else
           root.close()
@@ -736,8 +746,9 @@ Panel {
             width: parent.width
             spacing: Style.spacing.controlGap
 
-            // GlobalProtect cannot be driven headlessly, so this hands off to
-            // a terminal or the vendor GUI rather than pretending otherwise.
+            // A portal configured with a user connects from the panel; one
+            // without may be asked anything at all — a user, a challenge, a
+            // browser login — so the vendor GUI stays available for it.
             Button {
               visible: root.caps.connectNeedsTerminal && !vpn.connected
               text: vpn.profile ? "Connect in terminal" : "Open GlobalProtect"
@@ -1278,6 +1289,67 @@ Panel {
                 foreground: root.dim
                 fontFamily: root.fontFamily
                 onClicked: root.closeForms()
+              }
+            }
+          }
+
+          // ── GlobalProtect password ──────────────────────────────────────
+          // Asked here rather than in a terminal: gpclient runs in the
+          // foreground for the life of the tunnel and writes its log to
+          // stdout, so a terminal could show the prompts or keep the log, not
+          // both. Answering here leaves the log somewhere it can be read.
+          Column {
+            visible: root.gpPasswordHost !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSeparator { foreground: root.foreground }
+            PanelSectionHeader {
+              text: "CONNECT TO GLOBALPROTECT"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: "Password for " + Model.plain(root.gpPasswordHost)
+                    + ". Connecting also asks for your own password, to make the tunnel."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            TextField {
+              id: gpPassField
+              width: parent.width
+              placeholderText: "Password"
+              password: true
+              foreground: root.foreground
+              onAccepted: gpConnectButton.clicked()
+            }
+            Row {
+              spacing: Style.spacing.controlGap
+              Button {
+                id: gpConnectButton
+                text: "Connect"
+                bordered: true
+                enabled: gpPassField.text !== ""
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: {
+                  var host = root.gpPasswordHost
+                  var pass = gpPassField.text
+                  gpPassField.text = ""
+                  root.gpPasswordHost = ""
+                  vpn.connectGpPortal(host, pass)
+                }
+              }
+              Button {
+                text: "Cancel"
+                bordered: true
+                foreground: root.dim
+                fontFamily: root.fontFamily
+                onClicked: { gpPassField.text = ""; root.closeForms() }
               }
             }
           }

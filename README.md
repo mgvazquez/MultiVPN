@@ -88,10 +88,15 @@ connected. It stops watching after ~120 s but leaves the session standing, so
 finishing the login late still connects. Autostart is off for now —
 `openvpn3-session@` units want root-owned persistent configs.
 
-GlobalProtect is the thin one, and stays thin: `gpclient` has no status
-command and no systemd unit, needs root to make the tunnel, and its login is
-interactive, so the widget watches it, can take it down, and hands connecting
-to a terminal or the vendor GUI.
+GlobalProtect is the thin one: `gpclient` has no status command and no systemd
+unit, and needs root to make the tunnel. A portal that carries a **user**
+connects from the panel anyway — the panel asks for the password, `pkexec`
+raises the polkit dialog for root, and the tunnel runs detached with its output
+appended to `~/.local/state/multivpn/gpclient.log`. Neither password is ever an
+argument, so neither appears in `/proc`.
+
+A portal without a user may be asked anything — a user, a challenge, a browser
+login — so that one still hands off to a terminal or the vendor GUI.
 
 What a portal carries is no longer just a host name. `gpclient` accepts a
 client certificate (`-c`, `-k`), a user name, and `--as-gateway` to skip the

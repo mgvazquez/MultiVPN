@@ -299,17 +299,51 @@ Item {
     return host
   }
 
+  // Where gpclient's output goes, since nothing watches a terminal any more.
+  readonly property string gpLogPath:
+    Quickshell.env("HOME") + "/.local/state/multivpn/gpclient.log"
+
+  // A portal with a user is one whose prompts this can answer: the user is
+  // configuration and the password is the only thing left to ask. Without
+  // one, gpclient may ask for anything — a user, a challenge, a browser
+  // login — and the terminal is still the honest answer.
+  function gpCanRunHere(portal) {
+    var e = Model.portalEntry(portalFor(portal))
+    return e !== null && e.user !== ""
+  }
+
+  signal passwordNeeded(string host)
+
   function launchGlobalProtect(portal) {
-    if (!bar) return
     if (!portal) {
+      if (!bar) return
       bar.run("gpclient launch-gui")
       actionFinished("launch", true, "opening GlobalProtect")
       return
     }
+    if (gpCanRunHere(portal)) { passwordNeeded(portal); return }
+    if (!bar) return
     var inner = Model.gpConnectCommand(portalFor(portal), dnsWrapper)
     if (!inner) return
     bar.run("omarchy-launch-floating-terminal-with-presentation " + inner)
     actionFinished("launch", true, "opening terminal")
+  }
+
+  // The password is written to the script's stdin, never passed as an
+  // argument, so it is not in /proc for the life of the connection.
+  function connectGpPortal(portal, password) {
+    var entry = portalFor(portal)
+    if (!entry) return
+    intent = "up"
+    actionStatus = "Connecting…"
+    lastError = ""
+    lastAttemptFailed = false
+    lastAttemptName = portal
+    lastAttemptOrigin = "process"
+    gpConnect.secret = password + "\n"
+    gpConnect.command = ["bash", "-lc",
+                         Model.gpConnectScript(entry, dnsWrapper, gpLogPath)]
+    gpConnect.running = true
   }
 
   // openvpn3's session-start is not a plain run-to-completion command: a
@@ -871,6 +905,31 @@ Item {
       } else {
         root.lastError = Model.clamp(stderr.text, Model.MAX_FIELD).trim() || "Action failed"
         root.actionFinished(label, false, root.lastError)
+      }
+    }
+  }
+
+  Process {
+    id: gpConnect
+    property string secret: ""
+    stdinEnabled: true
+    stderr: StdioCollector { waitForEnd: true }
+    onStarted: { write(secret); secret = "" }
+    onExited: function(code) {
+      root.intent = ""
+      root.actionStatus = ""
+      root.refresh()
+      if (code === 0) {
+        root.lastError = ""
+        root.actionFinished("launch", true, "connected")
+      } else {
+        root.lastAttemptFailed = true
+        // The script forwards the log lines that look like the reason; the log
+        // itself keeps the rest.
+        var why = Model.clamp(stderr.text, Model.MAX_FIELD).trim()
+        root.lastError = "Connection failed" + (why ? ": " + why : "")
+                       + " — see " + root.gpLogPath
+        root.actionFinished("launch", false, "connection failed")
       }
     }
   }
