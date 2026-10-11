@@ -285,14 +285,31 @@ Item {
     actionFinished("launch", true, "opening terminal")
   }
 
+  // The wrapper ships with the plugin and is only used when a portal asks for
+  // DNS domains. gpclient's own vpnc-script falls back to the catch-all
+  // routing domain "~." when the portal provides none, and never sets the
+  // link's default route, so every query — public names included — reaches the
+  // corporate resolvers. See system/gpclient-dns-wrapper.
+  readonly property string dnsWrapper:
+    Qt.resolvedUrl("system/gpclient-dns-wrapper").toString().replace(/^file:\/\//, "")
+
+  function portalFor(host) {
+    for (var i = 0; i < portals.length; i++)
+      if (Model.portalHost(portals[i]) === host) return portals[i]
+    return host
+  }
+
   function launchGlobalProtect(portal) {
     if (!bar) return
-    var command = portal
-      ? "omarchy-launch-floating-terminal-with-presentation sudo -E gpclient connect "
-        + Model.shellQuote(portal)
-      : "gpclient launch-gui"
-    bar.run(command)
-    actionFinished("launch", true, portal ? "opening terminal" : "opening GlobalProtect")
+    if (!portal) {
+      bar.run("gpclient launch-gui")
+      actionFinished("launch", true, "opening GlobalProtect")
+      return
+    }
+    var inner = Model.gpConnectCommand(portalFor(portal), dnsWrapper)
+    if (!inner) return
+    bar.run("omarchy-launch-floating-terminal-with-presentation " + inner)
+    actionFinished("launch", true, "opening terminal")
   }
 
   // openvpn3's session-start is not a plain run-to-completion command: a
@@ -391,16 +408,21 @@ Item {
   readonly property string portalsPath:
     Quickshell.env("HOME") + "/.local/state/multivpn/portals.json"
 
-  function addPortal(name) {
-    var clean = String(name || "").trim()
-    if (!clean) return
+  function addPortal(entry) {
+    var e = Model.portalEntry(entry)
+    if (!e) return
     for (var i = 0; i < portals.length; i++)
-      if (portals[i] === clean) return
-    savePortals(portals.concat([clean]), "add")
+      if (Model.portalHost(portals[i]) === e.host) return
+    // A portal that needs nothing beyond its host stays a plain string, so a
+    // list written by an older version keeps the shape it had.
+    var stored = (e.user || e.cert || e.key || e.gateway || e.dns) ? e : e.host
+    savePortals(portals.concat([stored]), "add")
   }
 
   function removePortal(name) {
-    savePortals(portals.filter(function(p) { return p !== name }), "remove")
+    savePortals(portals.filter(function(p) {
+      return Model.portalHost(p) !== name
+    }), "remove")
   }
 
   function savePortals(list, label) {
@@ -441,9 +463,22 @@ Item {
     credentialsProc.running = true
   }
 
-  function pickConfigFile() {
-    if (!hasFilePicker) return
-    if (!filePicker.running) filePicker.running = true
+  function pickConfigFile() { pickFile("config") }
+
+  // One dialog, several callers. The slot rides along so the panel knows which
+  // field the path belongs to; "config" keeps reporting as plain "pick"
+  // because the import form reacts to that by opening itself.
+  function pickFile(slot) {
+    if (!hasFilePicker || filePicker.running) return
+    var which = slot || "config"
+    filePicker.slot = which
+    filePicker.command = which === "config"
+      ? ["zenity", "--file-selection", "--title=Select a VPN config",
+         "--file-filter=VPN configs | *.ovpn *.conf", "--file-filter=All files | *"]
+      : ["zenity", "--file-selection", "--title=Select a certificate or key",
+         "--file-filter=Certificates and keys | *.pem *.crt *.cer *.key *.p12 *.pfx",
+         "--file-filter=All files | *"]
+    filePicker.running = true
   }
 
   // The installer is deliberately NOT run through pkexec: it lives in a
@@ -862,15 +897,16 @@ Item {
   // zenity ships with Omarchy and is the only file dialog involved.
   Process {
     id: filePicker
-    command: ["zenity", "--file-selection", "--title=Select a VPN config",
-              "--file-filter=VPN configs | *.ovpn *.conf", "--file-filter=All files | *"]
+    property string slot: "config"
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         // A path, not a label: MAX_FIELD would quietly point the import at a
         // different file rather than at the one that was picked.
         var path = Model.clamp(text, Model.MAX_PATH).trim()
-        if (path !== "") root.actionFinished("pick", true, path)
+        if (path !== "")
+          root.actionFinished(filePicker.slot === "config"
+                              ? "pick" : "pick/" + filePicker.slot, true, path)
       }
     }
   }

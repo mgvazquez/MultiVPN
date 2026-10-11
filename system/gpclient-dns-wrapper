@@ -1,0 +1,51 @@
+#!/bin/sh
+#
+# vpnc-script wrapper for gpclient, used only when a portal is configured with
+# DNS domains. Without it the tunnel's resolvers answer everything.
+#
+# gpclient ships its own vpnc-script and picks it over the system one
+# (find_vpnc_script() tries /usr/libexec/gpclient/vpnc-script first). That
+# script decides the DNS routing like this:
+#
+#   split_dns_list=$(echo $CISCO_SPLIT_DNS | tr ',' ' ')
+#   if [ -z "$split_dns_list" ]; then
+#       split_dns_list='~.'
+#
+# Most GlobalProtect portals send no split DNS list, so the catch-all is the
+# normal case rather than an edge one, and every query — public names included
+# — goes to the corporate resolvers.
+#
+# Setting the variable is not enough on its own. The script calls `resolvectl
+# dns`, `domain`, `revert` and `status`, and never `default-route`, so
+# systemd-resolved leaves the link at its default of yes. With two links
+# claiming the default route resolved queries both and keeps whichever answers
+# first: public names reach the VPN about half the time, which is harder to
+# diagnose than a consistent failure because it looks intermittent.
+#
+# This runs after openconnect has built the environment and before the real
+# script reads it, so it is the last word; a list the server did provide is
+# left alone. It runs as root, so the resolvectl call needs no authorisation.
+#
+#   GP_DNS_DOMAINS  comma separated, as CISCO_SPLIT_DNS itself
+
+if [ -n "${GP_DNS_DOMAINS:-}" ]; then
+  CISCO_SPLIT_DNS="${CISCO_SPLIT_DNS:-$GP_DNS_DOMAINS}"
+  export CISCO_SPLIT_DNS
+fi
+
+script=""
+for s in /usr/libexec/gpclient/vpnc-script /usr/lib/gpclient/vpnc-script \
+         /etc/vpnc/vpnc-script /usr/share/vpnc-scripts/vpnc-script; do
+  [ -x "$s" ] && script="$s" && break
+done
+[ -n "$script" ] || { echo "gpclient-dns-wrapper: no vpnc-script found" >&2; exit 1; }
+
+"$script" "$@"
+rc=$?
+
+if [ "$reason" = "connect" ] && [ -n "${GP_DNS_DOMAINS:-}" ] && [ -n "${TUNDEV:-}" ]; then
+  command -v resolvectl >/dev/null 2>&1 &&
+    resolvectl default-route "$TUNDEV" no 2>/dev/null
+fi
+
+exit $rc

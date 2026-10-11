@@ -66,7 +66,7 @@ omarchy bar set io.github.nepomuk-software.multivpn profile home
 | **OpenVPN** (`openvpn-client@` and NetworkManager) | yes | `/etc/openvpn/client` + `nmcli` | yes | yes | systemd: stored; NM: prompt at connect |
 | **OpenVPN 3** (`openvpn3` D-Bus session manager) | yes | `openvpn3 configs-list` | no | yes | asked at session start — SSO opens the browser |
 | **WireGuard** (`wg-quick@` and NetworkManager) | yes | `/etc/wireguard` + `nmcli` | yes | yes | n/a — keys live in the config |
-| **GlobalProtect** (`gpclient`) | disconnect yes, connect hands off | no | no | no | n/a — SSO |
+| **GlobalProtect** (`gpclient`) | disconnect yes, connect hands off to a terminal | portals you add | no | portal, certificate | certificate + password, or SSO |
 
 Unified mode reports **every** connection that is up, not just one. Split-tunnel
 VPNs coexist without trouble — an OpenVPN profile pushing two office subnets and
@@ -88,11 +88,21 @@ connected. It stops watching after ~120 s but leaves the session standing, so
 finishing the login late still connects. Autostart is off for now —
 `openvpn3-session@` units want root-owned persistent configs.
 
-GlobalProtect is deliberately the thin one. `gpclient` has no status command,
-no systemd unit and an interactive SSO login, so the widget watches it, can take
-it down, and hands connecting to a terminal or the vendor GUI. Everything that
-comes off the tunnel interface — address, routes, uptime, throughput — works the
-same for all four.
+GlobalProtect is the thin one, and stays thin: `gpclient` has no status
+command and no systemd unit, needs root to make the tunnel, and its login is
+interactive, so the widget watches it, can take it down, and hands connecting
+to a terminal or the vendor GUI.
+
+What a portal carries is no longer just a host name. `gpclient` accepts a
+client certificate (`-c`, `-k`), a user name, and `--as-gateway` to skip the
+portal round trip and its second password prompt, so **Add portal** takes those
+too — a
+portal that wants a certificate had no way to be expressed before. A portal
+saved with nothing but a host is still stored as a plain host name and behaves
+exactly as it did.
+
+Everything that comes off the tunnel interface — address, routes, uptime,
+throughput — works the same for all four.
 
 ## Requirements
 
@@ -229,6 +239,26 @@ uptime, throughput) attach to that row like any other.
 One known gap: `gpclient` redacts host names in its own log, so when more than
 one portal is configured the widget cannot tell which one is connected. It
 reports GlobalProtect as connected without marking a row.
+
+## GlobalProtect and DNS
+
+Most GlobalProtect portals push resolvers but no split DNS list. `gpclient`'s
+own `vpnc-script` answers that with the catch-all routing domain `~.`, so every
+query — public names included — goes to the corporate resolvers. It also never
+sets the link's default route, which `systemd-resolved` then leaves at `yes`;
+with two links claiming it, resolved queries both and keeps whichever answers
+first, so names resolve through the VPN about half the time. That reads as
+intermittent rather than misconfigured, which is the hard kind of wrong.
+
+Giving a portal **DNS domains** fixes both. The widget then runs `gpclient`
+with `system/gpclient-dns-wrapper`, which sets `CISCO_SPLIT_DNS` before the
+real script reads it and issues the `resolvectl default-route … no` the script
+never issues. A list the server did provide is left alone.
+
+Scoping is exact, so list every internal domain: a name under one left out
+stops resolving. While the link is a default route that is invisible — the
+breakage appears at the moment the scoping is fixed, which makes it look caused
+by the fix.
 
 ## Usage
 

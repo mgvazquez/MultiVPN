@@ -46,6 +46,15 @@ Panel {
   // OpenVPN 3, then the root-owned systemd paths.
   property string importTarget: ""
   property bool portalFormOpen: false
+  // The portal form used to be one text field whose value lived in the item.
+  // It holds enough now that closeForms and the Escape handler have to see it.
+  property string portalHost: ""
+  property string portalUser: ""
+  property string portalCert: ""
+  property string portalKey: ""
+  property bool portalGateway: false
+  property string portalDns: ""
+  property bool portalAdvanced: false
   property bool setupOpen: false
   property int profileIndex: 0
   property bool cursorActive: false
@@ -144,6 +153,13 @@ Panel {
     removeBackend = ""
     importKind = ""
     importTarget = ""
+    portalHost = ""
+    portalUser = ""
+    portalCert = ""
+    portalKey = ""
+    portalGateway = false
+    portalDns = ""
+    portalAdvanced = false
     importOpen = false
     portalFormOpen = false
     setupOpen = false
@@ -201,7 +217,16 @@ Panel {
                                  : vpn.canImportToOvpn3 ? "openvpn3"
                                  : vpn.helperInstalled ? "system" : "")
                               : ""
+      } else if (command === "pick/cert" && ok) {
+        root.portalCert = message
+        // Certificate and key live in one PEM as often as in two, so the key
+        // follows until it is set on its own.
+        if (root.portalKey === "") root.portalKey = message
+      } else if (command === "pick/key" && ok) {
+        root.portalKey = message
       } else if (command === "import" && ok) {
+        root.closeForms()
+      } else if (command === "add" && ok) {
         root.closeForms()
       } else if (command === "credentials" && ok) {
         root.credentialsProfile = ""
@@ -319,7 +344,8 @@ Panel {
       onActivateRequested: root.activateCursor()
       onCloseRequested: {
         // Escape backs out of an open form first, then out of the panel.
-        if (root.importPath !== "" || root.credentialsProfile !== "" || root.removeTarget !== "")
+        if (root.importPath !== "" || root.credentialsProfile !== ""
+          || root.removeTarget !== "" || root.portalHost !== "")
           root.closeForms()
         else
           root.close()
@@ -1109,40 +1135,149 @@ Panel {
               textFormat: Text.PlainText
               width: parent.width
               text: "The portal host, e.g. vpn.example.com. Connecting opens a terminal "
-                    + "for the SSO login."
+                    + "for the login, which needs your password for sudo as well."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
             TextField {
-              id: portalField
               width: parent.width
+              text: root.portalHost
               placeholderText: "portal host"
               foreground: root.foreground
+              onTextChanged: root.portalHost = text
               onAccepted: savePortal.clicked()
             }
+
+            // gpclient prompts for the user when it is not given, which is one
+            // more thing to type on every connect for a value that never
+            // changes and is not a secret.
+            TextField {
+              width: parent.width
+              text: root.portalUser
+              placeholderText: "portal user (optional)"
+              foreground: root.foreground
+              onTextChanged: root.portalUser = text
+            }
+
+            // A portal that only wants a password needs nothing below this.
+            // One that wants a certificate has nowhere else to say so:
+            // gpclient takes -c and -k, but the widget had no field for them.
+            Row {
+              width: parent.width
+              spacing: Style.spacing.controlGap
+              TextField {
+                width: parent.width - certBrowse.width - Style.spacing.controlGap
+                text: root.portalCert
+                placeholderText: "client certificate (optional)"
+                foreground: root.foreground
+                onTextChanged: root.portalCert = text
+              }
+              Button {
+                id: certBrowse
+                text: "Browse"
+                bordered: true
+                enabled: vpn.hasFilePicker
+                tooltipText: vpn.hasFilePicker ? "" : "zenity is not installed"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: vpn.pickFile("cert")
+              }
+            }
+            Row {
+              width: parent.width
+              visible: root.portalCert !== ""
+              spacing: Style.spacing.controlGap
+              TextField {
+                width: parent.width - keyBrowse.width - Style.spacing.controlGap
+                text: root.portalKey
+                placeholderText: "private key"
+                foreground: root.foreground
+                onTextChanged: root.portalKey = text
+              }
+              Button {
+                id: keyBrowse
+                text: "Browse"
+                bordered: true
+                enabled: vpn.hasFilePicker
+                tooltipText: vpn.hasFilePicker ? "" : "zenity is not installed"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: vpn.pickFile("key")
+              }
+            }
+
+            Button {
+              text: root.portalAdvanced ? "Advanced ▾" : "Advanced ▸"
+              bordered: false
+              foreground: root.dim
+              fontFamily: root.fontFamily
+              onClicked: root.portalAdvanced = !root.portalAdvanced
+            }
+            Column {
+              visible: root.portalAdvanced
+              width: parent.width
+              spacing: Style.space(4)
+
+              // GlobalProtect exposes a portal and a gateway on the same host.
+              // Treated as a portal, gpclient authenticates there, asks for the
+              // gateway list and authenticates again — two password prompts for
+              // one connection. Off by default, because a host configured
+              // before this existed goes on behaving as it did.
+              Button {
+                text: "Connect straight to the gateway"
+                bordered: true
+                selected: root.portalGateway
+                tooltipText: "Skips the portal round trip and its second password prompt"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.portalGateway = !root.portalGateway
+              }
+              TextField {
+                width: parent.width
+                text: root.portalDns
+                placeholderText: "DNS domains, comma separated (optional)"
+                foreground: root.foreground
+                onTextChanged: root.portalDns = text
+              }
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: "Without domains the tunnel's resolvers answer every query, "
+                      + "public names included. List every internal domain: the "
+                      + "scoping is exact, so names under one left out stop resolving."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+
             Row {
               spacing: Style.spacing.controlGap
               Button {
                 id: savePortal
                 text: "Add"
                 bordered: true
-                enabled: portalField.text.trim() !== ""
+                enabled: root.portalHost.trim() !== ""
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onClicked: {
-                  vpn.addPortal(portalField.text)
-                  portalField.text = ""
-                  root.portalFormOpen = false
-                }
+                onClicked: vpn.addPortal({
+                  host: root.portalHost,
+                  user: root.portalUser,
+                  cert: root.portalCert,
+                  key: root.portalKey !== "" ? root.portalKey : root.portalCert,
+                  gateway: root.portalGateway,
+                  dns: root.portalDns
+                })
               }
               Button {
                 text: "Cancel"
                 bordered: true
                 foreground: root.dim
                 fontFamily: root.fontFamily
-                onClicked: { portalField.text = ""; root.closeForms() }
+                onClicked: root.closeForms()
               }
             }
           }

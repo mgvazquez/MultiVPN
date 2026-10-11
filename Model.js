@@ -767,25 +767,89 @@ function ovpn3ConnectScript(name) {
 
 // GlobalProtect portals have no system-wide registry, so the widget keeps its
 // own list under ~/.local/state. They are plain hostnames, nothing secret.
+// A portal used to be a host name and nothing else. It still may be: a plain
+// string is a valid entry and keeps the behaviour it had, which matters
+// because every existing portals.json is a list of them. An object carries
+// what gpclient needs for a portal that wants more than a password.
+function portalEntry(raw) {
+  if (typeof raw === "string")
+    return { host: raw.trim(), user: "", cert: "", key: "", gateway: false, dns: "" }
+  if (!raw || typeof raw !== "object") return null
+  var host = String(raw.host || "").trim()
+  if (!host) return null
+  return {
+    host: host,
+    user: String(raw.user || ""),
+    cert: String(raw.cert || ""),
+    key: String(raw.key || ""),
+    // Only ever on when it was asked for. A plain host keeps going through the
+    // portal, as it always has.
+    gateway: raw.gateway === true,
+    dns: String(raw.dns || "")
+  }
+}
+
+function portalHost(raw) {
+  var e = portalEntry(raw)
+  return e ? e.host : ""
+}
+
 function portalProfiles(portals) {
   var out = []
   for (var i = 0; i < (portals || []).length; i++) {
-    var name = String(portals[i] || "").trim()
-    if (!name) continue
+    var e = portalEntry(portals[i])
+    if (!e) continue
     out.push({
       backend: "globalprotect",
       origin: "process",
-      name: name,
-      remote: name,
+      name: e.host,
+      remote: e.host,
       port: "",
       proto: "gp",
       hasAuth: true,
+      hasCert: e.cert !== "",
       state: "inactive",
       autostart: false
     })
   }
   return out
 }
+
+// What to run for one portal, as a single shell command for the terminal.
+//
+// gpclient needs root to make the tunnel, so this is the one connect path that
+// cannot avoid an authentication prompt.
+//
+// --as-gateway matters when it is set. GlobalProtect exposes a portal and a
+// gateway on the same host; treated as a portal, gpclient authenticates there,
+// asks for the gateway list and authenticates again — two password prompts for
+// one connection.
+//
+// The DNS domains go through `env` rather than the caller's environment: sudo
+// resets it, and whether -E survives depends on a sudoers policy this cannot
+// see. `env` is just a command sudo runs as root, so it always works.
+function gpConnectCommand(raw, dnsWrapper) {
+  // Shared by both paths: everything except how the passwords are answered.
+  return "sudo -E" + gpArgs(raw, dnsWrapper, false)
+}
+
+function gpArgs(raw, dnsWrapper, stdinPassword) {
+  var e = portalEntry(raw)
+  if (!e) return ""
+  var a = ""
+  if (e.dns !== "" && dnsWrapper)
+    a += " env GP_DNS_DOMAINS=" + shellQuote(e.dns)
+  a += " gpclient connect"
+  if (e.gateway) a += " --as-gateway"
+  if (e.user !== "") a += " -u " + shellQuote(e.user)
+  if (stdinPassword) a += " --passwd-on-stdin"
+  if (e.cert !== "") a += " -c " + shellQuote(e.cert)
+  if (e.key !== "")  a += " -k " + shellQuote(e.key)
+  if (e.dns !== "" && dnsWrapper) a += " -s " + shellQuote(dnsWrapper)
+  a += " " + shellQuote(e.host)
+  return a
+}
+
 
 // Which kind of config the user just picked, so import does not need the user
 // to know. Checked on the head of the file only — inline certificates make
