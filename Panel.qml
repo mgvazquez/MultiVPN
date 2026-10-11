@@ -228,9 +228,6 @@ Panel {
                               : ""
       } else if (command === "pick/cert" && ok) {
         root.portalCert = message
-        // Certificate and key live in one PEM as often as in two, so the key
-        // follows until it is set on its own.
-        if (root.portalKey === "") root.portalKey = message
       } else if (command === "pick/key" && ok) {
         root.portalKey = message
       } else if (command === "import" && ok) {
@@ -1163,8 +1160,10 @@ Panel {
             Text {
               textFormat: Text.PlainText
               width: parent.width
-              text: "The portal host, e.g. vpn.example.com. Connecting opens a terminal "
-                    + "for the login, which needs your password for sudo as well."
+              text: "The portal host, e.g. vpn.example.com. With a user set, connecting "
+                    + "asks for the password here; without one it opens a terminal, "
+                    + "because gpclient may ask for anything. Either way it needs your "
+                    + "own password to make the tunnel."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1214,14 +1213,17 @@ Panel {
                 onClicked: vpn.pickFile("cert")
               }
             }
+            // Shown next to the certificate rather than after one is set: a
+            // field that appears once another is filled reads as the form
+            // changing its mind. Left empty it falls back to the certificate,
+            // which is right for the PEM that carries both.
             Row {
               width: parent.width
-              visible: root.portalCert !== ""
               spacing: Style.spacing.controlGap
               TextField {
                 width: parent.width - keyBrowse.width - Style.spacing.controlGap
                 text: root.portalKey
-                placeholderText: "private key"
+                placeholderText: "private key (defaults to the certificate)"
                 foreground: root.foreground
                 onTextChanged: root.portalKey = text
               }
