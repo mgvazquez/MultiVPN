@@ -148,10 +148,32 @@ sudo bash ~/.config/omarchy/plugins/io.github.nepomuk-software.multivpn/system/i
 Installiert werden `/usr/local/bin/multivpn-admin` (`root:root 0755`), die
 Polkit-Aktion `software.nepomuk.multivpn.manage`, zwei systemd-Units, die den
 Profil-Cache aktuell halten, und `/var/lib/multivpn/profiles.json`
-(`root:wheel 0640`). Rückgängig mit `--uninstall`.
+(`root:wheel 0640`). Dazu für GlobalProtect `/usr/local/bin/multivpn-gp`,
+`/usr/local/sbin/multivpn-gp-approve`, die Aktion
+`software.nepomuk.multivpn.gp` und der DNS-Wrapper unter
+`/usr/local/lib/multivpn/`, den `gpclient` als root ausführt — nie die Kopie
+im Plugin-Verzeichnis, das du beschreiben kannst. Rückgängig mit
+`--uninstall`.
+
+**GlobalProtect ohne Passwortabfrage.** Für `gpclient` selbst gibt es bewusst
+keine Regel: als root führt es aus, was `--script`, `--hip` oder `-S` nennen,
+schreibt, wohin `--cookie-cache` zeigt, und liest, was `-c` und `-k` nennen.
+Freigeben lässt sich nur `multivpn-gp`, das einen Host annimmt und sonst
+nichts. `sudo bash system/install.sh --gp-passwordless` legt
+`/etc/polkit-1/rules.d/49-multivpn-gp.rules` an — für den Benutzer, der es
+startet, nur aus einer lokalen, aktiven Sitzung (nicht über SSH). Jedes Portal
+wird einmal mit `sudo multivpn-gp-approve approve <host>` freigegeben (oder
+über den Schild-Knopf in seiner Zeile): im Terminal, mit Anzeige dessen, was
+freigegeben wird, und bewusst nicht über polkit, dessen `auth_admin_keep`
+sonst ein paar Minuten lang fremde Freigaben durchließe. Ein freigegebenes
+Portal verbindet mit genau den freigegebenen Einstellungen; Zertifikat und
+Schlüssel liest der Helfer nur mit deinen Rechten. Was bleibt: Jeder Prozess
+deines Benutzers in deiner lokalen Sitzung kann den Tunnel zu einem
+**freigegebenen** Portal auf- und abbauen — mehr nicht. Nach einem Update des
+Plugins `install.sh` erneut ausführen.
 
 Zwei Details zum Helfer: Beim Import liest er die Quelldatei **mit den Rechten
-des Aufrufers**, sonst könnte jeder, der ihn starten darf, beliebige
+des Aufrufers** (auch mit dessen Gruppen), sonst könnte jeder, der ihn starten darf, beliebige
 root-Dateien nach `/etc/openvpn/client` kopieren lassen. Und der Cache enthält
 nur Name, Server, Port, Protokoll und ob Zugangsdaten hinterlegt sind — nie
 Schlüsselmaterial oder Passwörter.

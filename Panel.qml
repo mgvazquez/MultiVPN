@@ -1336,8 +1336,10 @@ Panel {
             Text {
               textFormat: Text.PlainText
               width: parent.width
-              text: "Password for " + Model.plain(root.gpPasswordHost)
-                    + ". Connecting also asks for your own password, to make the tunnel."
+              text: "Password for " + Model.plain(root.gpPasswordHost) + ". "
+                    + (vpn.gpPasswordless && vpn.gpUsesHelper(root.gpPasswordHost)
+                       ? "The portal is approved, so making the tunnel needs nothing else."
+                       : "Connecting also asks for your own password, to make the tunnel.")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1570,6 +1572,11 @@ Panel {
     // saved password means the form that would offer it never opens.
     readonly property bool canForget: !!profile && profile.backend === "globalprotect"
                                       && vpn.hasKeyring && vpn.gpSaved[profile.name] === true
+    // A GlobalProtect portal the root helper could connect: its autostart slot,
+    // unused for GlobalProtect, shows whether it is approved and approves it.
+    readonly property bool canApprove: !!profile && profile.backend === "globalprotect"
+                                       && vpn.hasGpHelper && vpn.gpCanRunHere(profile.name)
+    readonly property string approval: canApprove ? vpn.gpApprovalFor(profile.name) : "none"
 
     signal activated()
     signal autostartToggled()
@@ -1641,6 +1648,7 @@ Panel {
       }
 
       PanelActionButton {
+        visible: !row.canApprove
         opacity: row.rowCaps.canAutostart ? 1 : 0
         enabled: row.rowCaps.canAutostart
         // A filled tick-box against an empty one survives 13 px; the previous
@@ -1651,6 +1659,24 @@ Panel {
         hoverColor: root.foreground
         fontFamily: root.fontFamily
         onClicked: row.autostartToggled()
+      }
+      // Approving opens a terminal with sudo, which shows what gets approved.
+      // Approved again after a change, since the helper keeps connecting the
+      // settings it was approved with.
+      PanelActionButton {
+        visible: row.canApprove
+        iconText: "󰒃"
+        tooltipText: row.approval === "approved"
+                     ? (vpn.gpPasswordless ? "Approved — connects without your password"
+                                           : "Approved — install.sh --gp-passwordless drops the password prompt")
+                     : row.approval === "differs"
+                       ? "Changed since it was approved — click to approve again"
+                       : "Approve for connecting without your password"
+        foreground: row.approval === "approved" ? root.foreground
+                  : row.approval === "differs" ? root.urgent : root.dim
+        hoverColor: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: vpn.approveGpPortal(row.profile.name)
       }
       PanelActionButton {
         // NM OpenVPN secrets live in NetworkManager, not the helper.

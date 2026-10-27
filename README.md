@@ -165,15 +165,21 @@ sudo bash ~/.config/omarchy/plugins/io.github.nepomuk-software.multivpn/system/i
 | Path | What it is |
 |---|---|
 | `/usr/local/bin/multivpn-admin` | the only thing that writes under `/etc/openvpn/client` and `/etc/wireguard`; `root:root 0755` |
-| `/usr/share/polkit-1/actions/software.nepomuk.multivpn.policy` | action `software.nepomuk.multivpn.manage`, `auth_admin_keep` |
+| `/usr/local/bin/multivpn-gp` | connects and disconnects approved GlobalProtect portals; `root:root 0755` |
+| `/usr/local/sbin/multivpn-gp-approve` | approves portals for it, with `sudo` only; `root:root 0755` |
+| `/usr/local/lib/multivpn/gpclient-dns-wrapper` | the DNS wrapper `gpclient` runs as root; `root:root 0755` |
+| `/usr/share/polkit-1/actions/software.nepomuk.multivpn.policy` | actions `software.nepomuk.multivpn.manage` and `…gp`, both `auth_admin_keep` |
 | `/etc/systemd/system/multivpn-cache.{path,service}` | regenerates the cache when either config directory changes |
 | `/var/lib/multivpn/profiles.json` | the profile list the panel reads; `root:wheel 0640` |
+| `/etc/multivpn/gp-portals.json` | approved GlobalProtect portals; `root:root 0644` |
+| `/etc/polkit-1/rules.d/49-multivpn-gp.rules` | only with `--gp-passwordless`, see below |
 
 Two things worth knowing about the helper:
 
 - On import it reads the source file **with the calling user's privileges**
-  (`setresuid` around the read). Otherwise anyone allowed to run the helper
-  could have arbitrary root-owned files copied into `/etc/openvpn/client`.
+  (`setresuid` and the user's own groups around the read). Otherwise anyone
+  allowed to run the helper could have arbitrary root-owned files copied into
+  `/etc/openvpn/client`.
 - The cache holds name, remote, port, protocol, allowed IPs and whether
   credentials exist — never key material or passwords. WireGuard private keys
   are read past, never copied out.
@@ -204,6 +210,42 @@ polkit.addRule(function (action, subject) {
 ```
 
 Without it, connecting raises the shell's polkit dialog. That works fine too.
+
+### GlobalProtect without a password prompt
+
+The same is **not** done for `gpclient`, on purpose. Run as root it executes
+whatever `--script`, `--hip` or `-S` names, writes wherever `--cookie-cache`
+points and reads whatever `-c` and `-k` name, so allowing `pkexec gpclient`
+without a password would allow anything — and a polkit rule cannot reliably
+tell its command lines apart.
+
+What can be allowed is `multivpn-gp`, which takes a host and nothing else:
+
+1. `sudo bash system/install.sh --gp-passwordless` installs the helpers and
+   `/etc/polkit-1/rules.d/49-multivpn-gp.rules`, which allows the
+   `software.nepomuk.multivpn.gp` action for **the user who ran it**, from a
+   **local, active** session — not over SSH.
+2. Approve each portal with the shield button on its row, or by hand:
+   `sudo multivpn-gp-approve approve <host>`. It runs in a terminal, shows what
+   it approves and asks before writing `/etc/multivpn/gp-portals.json`. It is
+   deliberately not a polkit action: `auth_admin_keep` would let anything
+   running as you approve a portal of its own for a few minutes after any other
+   authentication. `revoke <host>` and `list` undo and show.
+
+An approved portal then connects through the helper: the user, gateway, DNS
+domains and certificate it was approved with, the certificate and key read
+with your privileges only and copied to a root-only `/run/multivpn`, and a
+`gpclient` command line nobody else gets to write. If the portal changes in the
+panel the helper keeps connecting the approved version, and the shield turns
+red until it is approved again. Together with **Remember password**, connecting
+asks for nothing at all.
+
+What this does allow: anything running as you, in your local session, can
+bring a tunnel to an **approved** portal up or down. It cannot run anything as
+root, read root's files, or connect anywhere you did not approve.
+
+After an update of the plugin, run `install.sh` again: the panel compares the
+helper's version and falls back to `pkexec gpclient` while they differ.
 
 ## Installing a WireGuard config
 

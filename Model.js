@@ -469,16 +469,47 @@ function availabilityScript() {
     'printf "globalprotect=%s\\n" "$(have gpclient)";',
     'printf "zenity=%s\\n" "$(have zenity)";',
     'printf "secrettool=%s\\n" "$(have secret-tool)";',
-    // gpclient runs the wrapper as root, so only a copy nobody but root can
-    // change counts — the file and the directory holding it, or it could be
-    // swapped by a rename. Not a symlink, which could point anywhere.
-    'w=' + shellQuote(GP_DNS_WRAPPER) + '; dnsw=0;',
-    'if [ -f "$w" ] && [ ! -L "$w" ] && [ ! -L "${w%/*}" ]; then',
-    '  set -- $(stat -c "%u %a" "$w" "${w%/*}");',
-    '  [ "$1" = 0 ] && [ "$3" = 0 ] && [ $((0$2 & 022)) = 0 ] && [ $((0$4 & 022)) = 0 ] && dnsw=1;',
-    'fi;',
-    'printf "gpdnswrapper=%s\\n" "$dnsw"'
+    // Both of these run as root, so only a copy nobody but root can change
+    // counts — the file and the directory holding it, or it could be swapped
+    // by a rename. Not a symlink, which could point anywhere.
+    'rootonly() { [ -f "$1" ] && [ ! -L "$1" ] && [ ! -L "${1%/*}" ] || return 1;',
+    '  set -- $(stat -c "%u %a" "$1" "${1%/*}");',
+    '  [ "$1" = 0 ] && [ "$3" = 0 ] && [ $((0$2 & 022)) = 0 ] && [ $((0$4 & 022)) = 0 ]; };',
+    'ro() { rootonly "$1" && echo 1 || echo 0; };',
+    'printf "gpdnswrapper=%s\\n" "$(ro ' + shellQuote(GP_DNS_WRAPPER) + ')";',
+    'printf "gphelper=%s\\n" "$(ro ' + shellQuote(GP_HELPER) + ')";',
+    // --version needs no root and says whether install.sh has to run again
+    // after an update of the plugin.
+    'rootonly ' + shellQuote(GP_HELPER) + ' && printf "gphelperversion=%s\\n" "$(' + shellQuote(GP_HELPER) + ' --version 2>/dev/null | head -c 16)";',
+    // Whether polkit would let this session run the helper without asking —
+    // the rule lives where the user cannot read it, so ask polkit instead.
+    // No interaction allowed, so this never raises a dialog.
+    'if command -v pkcheck >/dev/null 2>&1 && pkcheck --action-id software.nepomuk.multivpn.gp --process $$ >/dev/null 2>&1;',
+    '  then echo gppasswordless=1; else echo gppasswordless=0; fi;',
+    'exit 0'
   ].join(" "))
+}
+
+// The GlobalProtect helper and its approved list, as installed by
+// system/install.sh. GP_HELPER_VERSION is the interface this widget speaks;
+// an older install keeps the old pkexec gpclient path until it is updated.
+var GP_HELPER = "/usr/local/bin/multivpn-gp"
+var GP_APPROVE = "/usr/local/sbin/multivpn-gp-approve"
+var GP_APPROVED = "/etc/multivpn/gp-portals.json"
+var GP_HELPER_VERSION = "1"
+
+// How a portal stands against the approved list: "approved" when it is there
+// as configured, "differs" when it is there but configured differently — the
+// helper then connects the approved version — and "none".
+function gpApproval(approved, raw) {
+  var e = portalEntry(raw)
+  if (!e || !approved || typeof approved !== "object") return "none"
+  var a = approved[e.host]
+  if (!a || typeof a !== "object") return "none"
+  var same = String(a.user || "") === e.user && String(a.cert || "") === e.cert
+          && String(a.key || "") === e.key && (a.gateway === true) === e.gateway
+          && String(a.dns || "") === e.dns
+  return same ? "approved" : "differs"
 }
 
 // The vpnc-script wrapper for DNS domains, as installed by system/install.sh.
@@ -872,7 +903,9 @@ function gpArgs(raw, dnsWrapper, stdinPassword) {
   if (e.cert !== "") a += " -c " + shellQuote(e.cert)
   if (e.key !== "")  a += " -k " + shellQuote(e.key)
   if (e.dns !== "" && dnsWrapper) a += " -s " + shellQuote(dnsWrapper)
-  a += " " + shellQuote(e.host)
+  // After "--", so a host starting with "-" is a host. Without it gpclient
+  // reads a host of "-s/tmp/x" as --script /tmp/x, run as root.
+  a += " -- " + shellQuote(e.host)
   return a
 }
 
@@ -953,10 +986,15 @@ function nmImportScript(path, name, kind) {
 // tunnel is up, "stored" takes it from the keyring. Exit 2 means the password
 // was turned down, exit 3 that nothing was stored. A stored password that is
 // turned down is cleared on the spot, so the next attempt asks again.
-function gpConnectScript(raw, dnsWrapper, logPath, mode) {
+//
+// `viaHelper` runs multivpn-gp instead of gpclient: it takes the host and
+// nothing else, connects the approved version of the portal, and is the one
+// command polkit may allow without a password.
+function gpConnectScript(raw, dnsWrapper, logPath, mode, viaHelper) {
   var e = portalEntry(raw)
   if (!e) return "exit 1"
-  var args = gpArgs(raw, dnsWrapper, true)
+  var args = viaHelper ? " " + shellQuote(GP_HELPER) + " connect " + shellQuote(e.host)
+                       : gpArgs(raw, dnsWrapper, true)
   var log = shellQuote(logPath)
   var attrs = gpSecretAttrs(raw)
   var stored = mode === "stored"

@@ -218,6 +218,7 @@ Item {
     if ((filterBackend === "" || filterBackend === "openvpn3") && !ovpn3ListProc.running)
       ovpn3ListProc.running = true
     if (unified && !portalLoad.running) portalLoad.running = true
+    if (unified && hasGpHelper && !approvedLoad.running) approvedLoad.running = true
     if (!profileStateProc.running) profileStateProc.running = true
   }
 
@@ -382,8 +383,45 @@ Item {
     gpConnect.mode = mode || "typed"
     gpConnect.secret = gpConnect.mode === "stored" ? "" : password + "\n"
     gpConnect.command = ["bash", "-lc",
-                         Model.gpConnectScript(entry, dnsWrapper, gpLogPath, gpConnect.mode)]
+                         Model.gpConnectScript(entry, dnsWrapper, gpLogPath, gpConnect.mode,
+                                               gpUsesHelper(portal))]
     gpConnect.running = true
+  }
+
+  // ── Approved portals ─────────────────────────────────────────────────────
+  // install.sh puts multivpn-gp in place; a portal approved for it with
+  // `sudo multivpn-gp-approve` connects through it, and polkit may allow that
+  // without a password. Anything else keeps going through pkexec gpclient.
+  readonly property bool hasGpHelper: availability.gphelper === "1"
+  // An install older than this widget speaks another interface, so it is not
+  // used until install.sh has run again.
+  readonly property bool gpHelperCurrent:
+    hasGpHelper && availability.gphelperversion === Model.GP_HELPER_VERSION
+  readonly property string gpHelperOutdated:
+    "The GlobalProtect helper is out of date — run system/install.sh again"
+  // Whether polkit lets this session run the helper without a password, i.e.
+  // `install.sh --gp-passwordless` ran for this user and the session is local
+  // and active.
+  readonly property bool gpPasswordless: gpHelperCurrent && availability.gppasswordless === "1"
+  // /etc/multivpn/gp-portals.json, as { host: entry }. Readable by anyone,
+  // writable only through multivpn-gp-approve.
+  property var gpApproved: ({})
+  onHasGpHelperChanged: if (hasGpHelper && !approvedLoad.running) approvedLoad.running = true
+
+  function gpApprovalFor(portal) {
+    return gpHelperCurrent ? Model.gpApproval(gpApproved, portalFor(portal)) : "none"
+  }
+
+  function gpUsesHelper(portal) { return gpApprovalFor(portal) !== "none" }
+
+  // In a terminal, with sudo: it shows what is approved before asking for the
+  // password. Deliberately not pkexec — see multivpn-gp-approve.
+  function approveGpPortal(portal) {
+    var e = Model.portalEntry(portalFor(portal))
+    if (!bar || !e || !hasGpHelper) return
+    bar.run("omarchy-launch-floating-terminal-with-presentation sudo "
+            + Model.shellQuote(Model.GP_APPROVE) + " approve " + Model.shellQuote(e.host))
+    actionFinished("approve", true, "opening terminal")
   }
 
   // Which portals have a password in the keyring, as { host: true }. Only
@@ -423,8 +461,11 @@ Item {
 
   // One place that knows how each backend is actually switched.
   function commandFor(forBackend, useOrigin, name, direction) {
+    // The helper disconnects whatever gpclient has up, however it was started,
+    // and is the command polkit may allow without a password.
     if (forBackend === "globalprotect")
-      return ["pkexec", "gpclient", "disconnect"]
+      return gpHelperCurrent ? ["pkexec", Model.GP_HELPER, "disconnect"]
+                             : ["pkexec", "gpclient", "disconnect"]
 
     // Only disconnect comes through here for openvpn3 — see connectOvpn3.
     if (forBackend === "openvpn3")
@@ -817,6 +858,23 @@ Item {
   }
 
   Process {
+    id: approvedLoad
+    command: ["bash", "-lc", "head -c " + Model.MAX_OUTPUT + " " + Model.shellQuote(Model.GP_APPROVED) + " 2>/dev/null"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var parsed = JSON.parse(Model.clamp(text).trim() || "{}")
+          root.gpApproved = parsed && typeof parsed.portals === "object" && parsed.portals
+                            ? parsed.portals : ({})
+        } catch (e) {
+          root.gpApproved = ({})
+        }
+      }
+    }
+  }
+
+  Process {
     id: portalSave
     property string label: "portals"
     // The portal list is the one profile store with neither the helper nor
@@ -994,9 +1052,14 @@ Item {
         // Up either way; a password that could not be saved, or DNS domains
         // that could not be applied, are the only things worth saying.
         var entry = Model.portalEntry(root.portalFor(root.lastAttemptName))
+        var approval = root.gpApprovalFor(root.lastAttemptName)
         root.lastError = /keyring/.test(why) ? "Connected, but " + why
                        : entry && entry.dns !== "" && !root.hasDnsWrapper
-                         ? "Connected, but " + root.dnsWrapperMissing : ""
+                         ? "Connected, but " + root.dnsWrapperMissing
+                       : root.hasGpHelper && !root.gpHelperCurrent ? root.gpHelperOutdated
+                       : approval === "differs"
+                         ? "Connected with the approved settings — this portal changed since; approve it again"
+                       : ""
         root.actionFinished("launch", true, "connected")
       } else if (mode === "stored" && (code === 2 || code === 3)) {
         // The script already cleared a rejected password. Asking again is the
