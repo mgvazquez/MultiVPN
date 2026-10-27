@@ -174,6 +174,25 @@ def read_users_file(path, uid):
             os.close(fd)
 
 
+def tunnel_up():
+    """Whether a gpclient is running, by process name.
+
+    gpclient keeps one tunnel and refuses a second on its lock — but only
+    once it starts, after this helper would have replaced the certificate
+    copies the running tunnel reconnects with. So this is asked first.
+    """
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open("/proc/%s/comm" % entry) as fh:
+                if fh.read().strip() == "gpclient":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def fresh_run_dir():
     """An empty, root-only directory for this tunnel's copies."""
     if os.path.lexists(RUN_DIR):
@@ -223,6 +242,8 @@ def cmd_connect(args):
     entry = check_entry(host, portals[host])
     if entry["owner"] != uid:
         die("portal %s was approved for another user" % host)
+    if tunnel_up():
+        die("GlobalProtect is already connected — disconnect it first", 4)
 
     fresh_run_dir()
     cert_copy = key_copy = ""

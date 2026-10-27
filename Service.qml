@@ -155,39 +155,42 @@ Item {
     if (!unified) return base
 
     var out = base.concat(Model.portalProfiles(portals))
-    // gpclient redacts host names in its log, so with several portals
-    // configured there is no way to tell which one is up. Mark none rather
-    // than guess — the header still reports that GlobalProtect is connected.
-    if (activeBackend === "globalprotect" && portals.length === 1) {
-      for (var i = 0; i < out.length; i++)
-        if (out[i].backend === "globalprotect") out[i].state = "active"
-    }
+
+    // The GlobalProtect tunnel, whichever connection the detail block is
+    // focused on: with OpenVPN up as well and in focus, its row still has to
+    // read as up.
+    var gp = null
+    for (var i = 0; i < activeConnections.length; i++)
+      if (activeConnections[i].backend === "globalprotect") gp = activeConnections[i]
+    if (!gp) return out
+    var gpName = gp.name || ""
+
+    // The row of the portal that is up, by the host on gpclient's command
+    // line. With several portals that used to be guesswork, so none was
+    // marked — and the fallback below then added a second row for the same
+    // portal.
+    var marked = Model.markActivePortal(out, gpName, portals.length)
 
     // A tunnel the panel is showing has to be something the panel can take
     // down, and the only switch is the one on a row. A GlobalProtect
     // connection whose portal was removed, or that was brought up from a
     // terminal, matched no row at all — the header said CONNECTED and there
     // was nothing to click.
-    if (activeBackend === "globalprotect" && activeOrigin === "process") {
-      var listed = false
-      for (var j = 0; j < out.length; j++)
-        if (out[j].backend === "globalprotect" && out[j].state === "active") listed = true
-      if (!listed)
-        out.push({
-          backend: "globalprotect",
-          origin: "process",
-          // Unnamed when the log is gone or the tunnel came from elsewhere.
-          // The label is all the name is for here: disconnecting is
-          // `gpclient disconnect`, which takes no argument.
-          name: activeName !== "" ? activeName : "GlobalProtect",
-          remote: activeName,
-          port: "",
-          proto: "gp",
-          hasAuth: true,
-          state: "active",
-          autostart: false
-        })
-    }
+    if (marked === 0 && gp.origin === "process")
+      out.push({
+        backend: "globalprotect",
+        origin: "process",
+        // Unnamed when the tunnel came from elsewhere and the log is gone.
+        // The label is all the name is for here: disconnecting is
+        // `gpclient disconnect`, which takes no argument.
+        name: gpName !== "" ? gpName : "GlobalProtect",
+        remote: gpName,
+        port: "",
+        proto: "gp",
+        hasAuth: true,
+        state: "active",
+        autostart: false
+      })
     return out
   }
 
@@ -1068,6 +1071,11 @@ Item {
                                     : "No saved password — enter it"
         root.passwordNeeded(root.lastAttemptName)
         root.actionFinished("launch", false, "password needed")
+      } else if (code === 4) {
+        // Another tunnel is up and nothing was attempted, so there is no log
+        // to point at — and nothing failed that should mark the row.
+        root.lastError = why || "GlobalProtect is already connected — disconnect it first"
+        root.actionFinished("launch", false, "already connected")
       } else {
         root.lastAttemptFailed = true
         // The script forwards the log lines that look like the reason; the log

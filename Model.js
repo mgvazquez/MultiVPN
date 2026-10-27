@@ -395,14 +395,16 @@ function unifiedStatusScript() {
     'fi;',
 
     // GlobalProtect owns no unit, so it gets whatever tunnel device nothing
-    // else has claimed. It does have a name now: the connect script writes a
-    // header per attempt to its log, which is the only place the portal is
-    // recorded — gpclient redacts host names in its own.
+    // else has claimed. Its name is the host on gpclient's own command line:
+    // both connect paths put it last, after "--", and /proc/<pid>/cmdline is
+    // readable even though gpclient runs as root. gpclient redacts host names
+    // in its log, so that is no help.
     //
-    // A tunnel brought up outside the widget leaves the previous header
-    // standing, so the name can be the last one this widget connected rather
-    // than the one actually up. An approximate name beats none: it is what
-    // lets the row be matched, and a row is what can be switched off.
+    // A tunnel brought up some other way may not end in "--" <host>. Then the
+    // header the connect script writes per attempt to the widget's log is the
+    // fallback — the last one this widget connected, which may not be the one
+    // actually up. An approximate name beats none: it is what lets the row be
+    // matched, and a row is what can be switched off.
     'pid=$(pgrep -x gpclient 2>/dev/null | head -1);',
     '[ -z "$pid" ] && pid=$(pgrep -x gpservice 2>/dev/null | head -1);',
     'if [ -n "$pid" ]; then',
@@ -413,9 +415,9 @@ function unifiedStatusScript() {
     '  et=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d "[:space:]");',
     '  gs="";',
     '  [ -n "$et" ] && gs=$(( $(date +%s) - et ));',
-    '  gn="";',
+    '  gn=$(tr "\\0" "\\n" < /proc/"$pid"/cmdline 2>/dev/null | awk \'f { h = $0 } $0 == "--" { f = 1 } END { print h }\');',
     '  gl="${XDG_STATE_HOME:-$HOME/.local/state}/multivpn/gpclient.log";',
-    '  [ -r "$gl" ] && gn=$(grep -a "^==== " "$gl" | tail -1 | awk \'{print $4}\');',
+    '  [ -z "$gn" ] && [ -r "$gl" ] && gn=$(grep -a "^==== " "$gl" | tail -1 | awk \'{print $4}\');',
     '  emit globalprotect process "$gn" "$gi" "$gs" "";',
     'fi'
   ].join(" "))
@@ -872,6 +874,24 @@ function portalProfiles(portals) {
   return out
 }
 
+// Which GlobalProtect row is the tunnel that is up, by the name the status
+// script reads off gpclient's command line. With a single portal and no name
+// to go by, that portal — a tunnel can only be one of them, and the panel
+// assumed as much before it knew names. Returns how many rows were marked;
+// none means the tunnel matches no row and the caller adds one for it.
+function markActivePortal(rows, activeName, portalCount) {
+  var marked = 0
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].backend !== "globalprotect") continue
+    if ((activeName !== "" && rows[i].name === activeName)
+        || (activeName === "" && portalCount === 1)) {
+      rows[i].state = "active"
+      marked++
+    }
+  }
+  return marked
+}
+
 // What to run for one portal, as a single shell command for the terminal.
 //
 // gpclient needs root to make the tunnel, so this is the one connect path that
@@ -984,7 +1004,8 @@ function nmImportScript(path, name, kind) {
 // `mode` says where the portal password comes from: "typed" reads it from
 // stdin, "typed+remember" does the same and saves it to the keyring once the
 // tunnel is up, "stored" takes it from the keyring. Exit 2 means the password
-// was turned down, exit 3 that nothing was stored. A stored password that is
+// was turned down, exit 3 that nothing was stored, exit 4 that a tunnel is
+// already up. A stored password that is
 // turned down is cleared on the spot, so the next attempt asks again.
 //
 // `viaHelper` runs multivpn-gp instead of gpclient: it takes the host and
@@ -1001,6 +1022,13 @@ function gpConnectScript(raw, dnsWrapper, logPath, mode, viaHelper) {
   var remember = mode === "typed+remember"
 
   return capped([
+    // gpclient holds one tunnel at a time, and a second connect fails on its
+    // lock — after this script has written a log header naming the wrong
+    // portal, and after multivpn-gp has replaced the certificate copies the
+    // running tunnel reconnects with. Exit 4, before touching anything.
+    'if pgrep -x gpclient >/dev/null 2>&1; then',
+    '  echo "GlobalProtect is already connected — disconnect it first" >&2; exit 4;',
+    'fi;',
     stored
       ? 'pass=$(timeout 5 secret-tool lookup ' + attrs + ' 2>/dev/null);'
         + ' [ -n "$pass" ] || { echo "no stored password" >&2; exit 3; };'
