@@ -16,6 +16,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN=/usr/local/bin/multivpn-admin
 POLICY=/usr/share/polkit-1/actions/software.nepomuk.multivpn.policy
 UNIT_DIR=/etc/systemd/system
+# gpclient runs the DNS wrapper as root, so the copy it runs lives here, owned
+# by root, and never in the plugin directory the user can write.
+LIB_DIR=/usr/local/lib/multivpn
 
 [[ $EUID -eq 0 ]] || { echo "Please run with sudo." >&2; exit 1; }
 
@@ -33,7 +36,7 @@ if [[ ${1:-} == --uninstall ]]; then
   systemctl disable --now multivpn-cache.path 2>/dev/null || true
   rm -f "$BIN" "$POLICY" \
         "$UNIT_DIR/multivpn-cache.path" "$UNIT_DIR/multivpn-cache.service"
-  rm -rf /var/lib/multivpn
+  rm -rf /var/lib/multivpn "$LIB_DIR"
   remove_legacy
   systemctl daemon-reload
   echo "removed."
@@ -50,6 +53,8 @@ install -o root -g root -m 0755 "$HERE/multivpn-admin" "$BIN"
 install -o root -g root -m 0644 "$HERE/software.nepomuk.multivpn.policy" "$POLICY"
 install -o root -g root -m 0644 "$HERE/multivpn-cache.path" "$UNIT_DIR/"
 install -o root -g root -m 0644 "$HERE/multivpn-cache.service" "$UNIT_DIR/"
+install -d -o root -g root -m 0755 "$LIB_DIR"
+install -o root -g root -m 0755 "$HERE/gpclient-dns-wrapper" "$LIB_DIR/"
 
 systemctl daemon-reload
 systemctl enable --now multivpn-cache.path
@@ -65,4 +70,5 @@ echo "installed:"
 echo "  $BIN"
 echo "  $POLICY"
 echo "  $UNIT_DIR/multivpn-cache.{path,service}  (enabled)"
+echo "  $LIB_DIR/gpclient-dns-wrapper"
 echo "  /var/lib/multivpn/profiles.json          ($count profiles)"

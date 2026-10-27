@@ -468,9 +468,24 @@ function availabilityScript() {
     'printf "nmopenvpn=%s\\n" "$plug";',
     'printf "globalprotect=%s\\n" "$(have gpclient)";',
     'printf "zenity=%s\\n" "$(have zenity)";',
-    'printf "secrettool=%s\\n" "$(have secret-tool)"'
+    'printf "secrettool=%s\\n" "$(have secret-tool)";',
+    // gpclient runs the wrapper as root, so only a copy nobody but root can
+    // change counts — the file and the directory holding it, or it could be
+    // swapped by a rename. Not a symlink, which could point anywhere.
+    'w=' + shellQuote(GP_DNS_WRAPPER) + '; dnsw=0;',
+    'if [ -f "$w" ] && [ ! -L "$w" ] && [ ! -L "${w%/*}" ]; then',
+    '  set -- $(stat -c "%u %a" "$w" "${w%/*}");',
+    '  [ "$1" = 0 ] && [ "$3" = 0 ] && [ $((0$2 & 022)) = 0 ] && [ $((0$4 & 022)) = 0 ] && dnsw=1;',
+    'fi;',
+    'printf "gpdnswrapper=%s\\n" "$dnsw"'
   ].join(" "))
 }
+
+// The vpnc-script wrapper for DNS domains, as installed by system/install.sh.
+// Never the copy inside the plugin: gpclient runs it as root, and the plugin
+// directory is writable by the user — anything running as them could edit it
+// and wait for the next connect.
+var GP_DNS_WRAPPER = "/usr/local/lib/multivpn/gpclient-dns-wrapper"
 
 // Human summary for the panel header.
 function availabilityLabel(av) {

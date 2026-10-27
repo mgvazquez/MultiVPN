@@ -312,13 +312,19 @@ Item {
     actionFinished("launch", true, "opening terminal")
   }
 
-  // The wrapper ships with the plugin and is only used when a portal asks for
-  // DNS domains. gpclient's own vpnc-script falls back to the catch-all
-  // routing domain "~." when the portal provides none, and never sets the
-  // link's default route, so every query — public names included — reaches the
-  // corporate resolvers. See system/gpclient-dns-wrapper.
-  readonly property string dnsWrapper:
-    Qt.resolvedUrl("system/gpclient-dns-wrapper").toString().replace(/^file:\/\//, "")
+  // The wrapper is only used when a portal asks for DNS domains. gpclient's own
+  // vpnc-script falls back to the catch-all routing domain "~." when the
+  // portal provides none, and never sets the link's default route, so every
+  // query — public names included — reaches the corporate resolvers. See
+  // system/gpclient-dns-wrapper.
+  //
+  // It runs as root, so it is the root-owned copy install.sh puts in place or
+  // nothing: the one in the plugin directory is writable by the user. Without
+  // it the portal still connects, just without the DNS scoping.
+  readonly property bool hasDnsWrapper: availability.gpdnswrapper === "1"
+  readonly property string dnsWrapper: hasDnsWrapper ? Model.GP_DNS_WRAPPER : ""
+  readonly property string dnsWrapperMissing:
+    "DNS domains are ignored until the root helper is installed (system/install.sh)"
 
   function portalFor(host) {
     for (var i = 0; i < portals.length; i++)
@@ -985,9 +991,12 @@ Item {
       var why = Model.clamp(stderr.text, Model.MAX_FIELD).trim()
       if (mode !== "typed") root.refreshGpSaved()
       if (code === 0) {
-        // Up either way; a password that could not be saved is the only thing
-        // worth saying.
-        root.lastError = /keyring/.test(why) ? "Connected, but " + why : ""
+        // Up either way; a password that could not be saved, or DNS domains
+        // that could not be applied, are the only things worth saying.
+        var entry = Model.portalEntry(root.portalFor(root.lastAttemptName))
+        root.lastError = /keyring/.test(why) ? "Connected, but " + why
+                       : entry && entry.dns !== "" && !root.hasDnsWrapper
+                         ? "Connected, but " + root.dnsWrapperMissing : ""
         root.actionFinished("launch", true, "connected")
       } else if (mode === "stored" && (code === 2 || code === 3)) {
         // The script already cleared a rejected password. Asking again is the

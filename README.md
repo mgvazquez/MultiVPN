@@ -279,6 +279,13 @@ with `system/gpclient-dns-wrapper`, which sets `CISCO_SPLIT_DNS` before the
 real script reads it and issues the `resolvectl default-route … no` the script
 never issues. A list the server did provide is left alone.
 
+`gpclient` runs that wrapper as root, so the widget only uses the copy
+`system/install.sh` puts in `/usr/local/lib/multivpn/`, owned by root. The one
+in the plugin directory is never run: that directory is yours to write, and
+anything running as you could edit the script and wait for the next connect.
+Without the installed copy the portal still connects, without the DNS scoping,
+and the panel says so.
+
 Scoping is exact, so list every internal domain: a name under one left out
 stops resolving. While the link is a default route that is invisible — the
 breakage appears at the moment the scoping is fixed, which makes it look caused

@@ -1281,6 +1281,7 @@ Panel {
                 text: "Without domains the tunnel's resolvers answer every query, "
                       + "public names included. List every internal domain: the "
                       + "scoping is exact, so names under one left out stop resolving."
+                      + (vpn.hasDnsWrapper ? "" : " " + vpn.dnsWrapperMissing + ".")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
