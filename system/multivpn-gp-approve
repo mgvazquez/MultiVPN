@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Approves GlobalProtect portals for multivpn-gp. Run with sudo, in a terminal.
+
+  sudo multivpn-gp-approve approve <host>   approve the portal as configured
+                                            in your ~/.local/state/multivpn/portals.json
+  sudo multivpn-gp-approve revoke <host>    take the approval back
+  sudo multivpn-gp-approve list             show what is approved
+
+Approving is what lets multivpn-gp connect a portal — without a password, when
+the polkit rule from `install.sh --gp-passwordless` is in place. So it is
+deliberately not reachable through pkexec: polkit's auth_admin_keep would let
+anything running as you approve a portal of its own for a few minutes after
+any other authentication. sudo in a terminal shows what is being approved
+before it asks for the password.
+"""
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pwd
+import sys
+import tempfile
+
+HELPER = "/usr/local/bin/multivpn-gp"
+PORTALS = ".local/state/multivpn/portals.json"
+MAX_PORTALS_BYTES = 262144
+
+
+def die(msg, code=1):
+    print("multivpn-gp-approve: %s" % msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def load_helper():
+    """multivpn-gp itself, so both sides validate with the same rules.
+
+    Only the installed, root-owned copy: this runs as root.
+    """
+    probe = os.lstat(HELPER) if os.path.lexists(HELPER) else None
+    if probe is None or probe.st_uid != 0 or probe.st_mode & 0o022 or not os.path.isfile(HELPER) \
+            or os.path.islink(HELPER):
+        die("%s is not installed — run system/install.sh first" % HELPER)
+    loader = importlib.machinery.SourceFileLoader("multivpn_gp", HELPER)
+    spec = importlib.util.spec_from_loader("multivpn_gp", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def sudo_caller():
+    """The user who ran sudo, from a terminal — or refuse."""
+    if os.geteuid() != 0:
+        die("run with sudo")
+    # pkexec sets PKEXEC_UID itself and sudo resets the environment, so its
+    # presence means pkexec, whatever the caller tried.
+    if "PKEXEC_UID" in os.environ:
+        die("not through pkexec — run it with sudo in a terminal")
+    raw = os.environ.get("SUDO_UID", "")
+    if not raw.isdigit() or int(raw) == 0:
+        die("run with sudo from your own user, not as root")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        die("needs a terminal: approving has to be confirmed by a person")
+    return int(raw)
+
+
+def read_portals(gp, uid):
+    home = pwd.getpwuid(uid).pw_dir
+    path = os.path.join(home, PORTALS)
+    data = gp.read_users_file(path, uid)
+    if len(data) > MAX_PORTALS_BYTES:
+        die("%s is larger than %d bytes" % (path, MAX_PORTALS_BYTES))
+    try:
+        portals = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        die("cannot parse %s: %s" % (path, exc))
+    return portals if isinstance(portals, list) else []
+
+
+def find_portal(portals, host):
+    """The same reading of an entry as Model.portalEntry in the widget."""
+    for raw in portals:
+        if isinstance(raw, str) and raw.strip() == host:
+            return {"user": "", "cert": "", "key": "", "gateway": False, "dns": ""}
+        if isinstance(raw, dict) and str(raw.get("host", "")).strip() == host:
+            return {
+                "user": str(raw.get("user") or ""),
+                "cert": str(raw.get("cert") or ""),
+                "key": str(raw.get("key") or ""),
+                "gateway": raw.get("gateway") is True,
+                "dns": str(raw.get("dns") or ""),
+            }
+    return None
+
+
+def read_approved(gp):
+    if not os.path.lexists(gp.APPROVED):
+        return {"version": 1, "portals": {}}
+    portals = gp.load_approved()
+    return {"version": 1, "portals": portals}
+
+
+def write_approved(gp, data):
+    folder = os.path.dirname(gp.APPROVED)
+    if not os.path.lexists(folder):
+        os.mkdir(folder, 0o755)
+    if not gp.trusted(folder, True):
+        die("%s is not a root-owned directory" % folder)
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".gp-portals-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.chown(tmp, 0, 0)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, gp.APPROVED)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def describe(host, entry):
+    print("  portal   %s" % host)
+    print("  user     %s" % entry["user"])
+    print("  gateway  %s" % ("yes (--as-gateway)" if entry["gateway"] else "no"))
+    print("  dns      %s" % (entry["dns"] or "—"))
+    print("  cert     %s" % (entry["cert"] or "—"))
+    print("  key      %s" % (entry["key"] or "—"))
+    if "owner" in entry:
+        try:
+            print("  for      %s" % pwd.getpwuid(entry["owner"]).pw_name)
+        except KeyError:
+            print("  for      uid %d" % entry["owner"])
+
+
+def cmd_approve(gp, uid, args):
+    if len(args) != 1:
+        die("usage: approve <host>")
+    host = args[0]
+    if not gp.HOST_RE.match(host):
+        die("invalid portal host: %r" % host)
+    entry = find_portal(read_portals(gp, uid), host)
+    if entry is None:
+        die("%s is not in your portal list — add it in the panel first" % host)
+    if not entry["user"]:
+        die("%s has no user; only portals with a user connect from the panel" % host)
+    entry["owner"] = uid
+    gp.check_entry(host, entry)
+    # The files have to be readable as you now, or connecting would fail later
+    # with nothing to show for the approval.
+    for field in ("cert", "key"):
+        if entry[field]:
+            gp.read_users_file(entry[field], uid)
+
+    print("Approve passwordless connect for:\n")
+    describe(host, entry)
+    print("\nAnything running as %s in your local session will be able to connect"
+          % pwd.getpwuid(uid).pw_name)
+    print("this portal without asking. It cannot connect anything not approved here.")
+    if input("\nApprove? [y/N] ").strip().lower() not in ("y", "yes"):
+        die("not approved", 0)
+
+    data = read_approved(gp)
+    data["portals"][host] = entry
+    write_approved(gp, data)
+    print("approved: %s" % host)
+
+
+def cmd_revoke(gp, _uid, args):
+    if len(args) != 1:
+        die("usage: revoke <host>")
+    data = read_approved(gp)
+    if data["portals"].pop(args[0], None) is None:
+        die("%s is not approved" % args[0])
+    write_approved(gp, data)
+    print("revoked: %s" % args[0])
+
+
+def cmd_list(gp, _uid, args):
+    if args:
+        die("usage: list")
+    portals = read_approved(gp)["portals"]
+    if not portals:
+        print("no approved portals")
+    for host in sorted(portals):
+        describe(host, portals[host])
+        print()
+
+
+COMMANDS = {"approve": cmd_approve, "revoke": cmd_revoke, "list": cmd_list}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    command = sys.argv[1]
+    if command not in COMMANDS:
+        die("unknown command: %s" % command, 2)
+    uid = sudo_caller()
+    COMMANDS[command](load_helper(), uid, sys.argv[2:])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

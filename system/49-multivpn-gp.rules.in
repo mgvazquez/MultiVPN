@@ -1,0 +1,16 @@
+// Installed by `install.sh --gp-passwordless`, with @USER@ replaced by the
+// user who ran it.
+//
+// Lets that user connect and disconnect GlobalProtect portals approved with
+// multivpn-gp-approve, without a password — from a local, active session only,
+// so not over SSH and not from a session in the background.
+//
+// The action is multivpn-gp's alone. It does not cover gpclient, whose
+// options run, write and read files as root, nor approving portals.
+polkit.addRule(function (action, subject) {
+  if (action.id == "software.nepomuk.multivpn.gp" &&
+      subject.user == "@USER@" &&
+      subject.local && subject.active) {
+    return polkit.Result.YES;
+  }
+});

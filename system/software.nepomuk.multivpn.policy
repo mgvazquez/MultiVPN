@@ -18,4 +18,22 @@
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/multivpn-admin</annotate>
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
+
+  <!-- Connecting and disconnecting approved GlobalProtect portals. Its own
+       action, so that a rule can allow exactly this without a password
+       (49-multivpn-gp.rules) and nothing else: neither gpclient with options
+       of the caller's choosing, nor approving portals, which takes sudo. -->
+  <action id="software.nepomuk.multivpn.gp">
+    <description>Connect an approved GlobalProtect portal</description>
+    <description xml:lang="de">Freigegebenes GlobalProtect-Portal verbinden</description>
+    <message>Authentication is required to connect or disconnect GlobalProtect.</message>
+    <message xml:lang="de">Zum Verbinden oder Trennen von GlobalProtect ist eine Authentifizierung nötig.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/multivpn-gp</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
 </policyconfig>

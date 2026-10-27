@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Connects and disconnects GlobalProtect portals for the MultiVPN widget.
+
+Runs as root through pkexec (action software.nepomuk.multivpn.gp). It exists so
+that polkit can allow connecting without a password without allowing
+`gpclient` itself: run as root, gpclient executes whatever --script, --hip or
+-S names, writes wherever --cookie-cache points and reads whatever -c and -k
+name. This helper takes no options from its caller at all.
+
+  connect <host>    connect a portal approved with multivpn-gp-approve;
+                    the portal password on stdin
+  disconnect        disconnect whatever gpclient has up
+  --version         the interface version, for the panel to compare
+
+Only portals in /etc/multivpn/gp-portals.json can be connected, each with the
+user, gateway, DNS domains and certificate it was approved with, and only by
+the user who approved it. Approving needs sudo in a terminal; see
+multivpn-gp-approve.
+"""
+
+import json
+import os
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+
+VERSION = "1"
+
+GPCLIENT = "/usr/bin/gpclient"
+APPROVED = "/etc/multivpn/gp-portals.json"
+# Installed by install.sh next to nothing the user can write. gpclient runs it
+# as root.
+DNS_WRAPPER = "/usr/local/lib/multivpn/gpclient-dns-wrapper"
+# Copies of the certificate and key for the life of the tunnel. tmpfs, root
+# only, emptied on every connect and disconnect.
+RUN_DIR = "/run/multivpn"
+
+# A certificate or key is a few kilobytes. The path is the user's, so without
+# a ceiling it could be /dev/zero.
+MAX_FILE_BYTES = 1048576
+
+# Nothing that can start with "-", so nothing gpclient could take for an
+# option even without the "--" that comes before it anyway. \Z, not $: in
+# Python $ also matches before a trailing newline.
+HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}(:[0-9]{1,5})?\Z")
+USER_RE = re.compile(r"^[A-Za-z0-9._@+\\-]{1,128}\Z")
+DNS_RE = re.compile(r"^[A-Za-z0-9.~-]+(,[A-Za-z0-9.~-]+)*\Z")
+# gpclient tells PKCS#8 from PKCS#12 by the extension, so the copy keeps it.
+CERT_EXTENSIONS = (".pem", ".crt", ".cer", ".key", ".p12", ".pfx")
+
+
+def die(msg, code=1):
+    print("multivpn-gp: %s" % msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def require_root():
+    if os.geteuid() != 0:
+        die("must run as root — invoke through pkexec")
+
+
+def caller_uid():
+    """UID of the caller as handed over by pkexec, None when run as root."""
+    raw = os.environ.get("PKEXEC_UID")
+    if raw is None or not raw.isdigit():
+        return None
+    uid = int(raw)
+    return uid if uid != 0 else None
+
+
+def trusted(path, want_dir):
+    """Owned by root, not writable by anyone else, not a symlink."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    kind_ok = stat.S_ISDIR(st.st_mode) if want_dir else stat.S_ISREG(st.st_mode)
+    return kind_ok and st.st_uid == 0 and not st.st_mode & 0o022
+
+
+def load_approved():
+    # The approved list is the whole security boundary: a portal is only as
+    # safe as the file that says it may be connected without a password.
+    if not trusted(os.path.dirname(APPROVED), True) or not trusted(APPROVED, False):
+        die("%s is missing or not owned by root — approve a portal with "
+            "sudo multivpn-gp-approve first" % APPROVED)
+    try:
+        with open(APPROVED) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        die("cannot read %s: %s" % (APPROVED, exc))
+    portals = data.get("portals") if isinstance(data, dict) else None
+    return portals if isinstance(portals, dict) else {}
+
+
+def check_entry(host, entry):
+    """Everything that goes into gpclient's argv, checked again here.
+
+    multivpn-gp-approve checks the same before writing, but the file is read
+    as data and this is what turns it into a root command line.
+    """
+    if not isinstance(entry, dict):
+        die("approved entry for %s is malformed" % host)
+    user = entry.get("user", "")
+    dns = entry.get("dns", "")
+    if not isinstance(user, str) or not USER_RE.match(user):
+        die("approved entry for %s has an invalid user" % host)
+    if not isinstance(dns, str) or (dns and (len(dns) > 1024 or not DNS_RE.match(dns))):
+        die("approved entry for %s has invalid DNS domains" % host)
+    for field in ("cert", "key"):
+        path = entry.get(field, "")
+        if not isinstance(path, str) or (path and (not os.path.isabs(path) or "\0" in path)):
+            die("approved entry for %s has an invalid %s path" % (host, field))
+        if path and not path.lower().endswith(CERT_EXTENSIONS):
+            die("approved %s for %s has an unexpected extension" % (field, host))
+    if not isinstance(entry.get("owner"), int):
+        die("approved entry for %s has no owner" % host)
+    return entry
+
+
+class AsCaller:
+    """Drop to the caller's uid, gid and supplementary groups, and back.
+
+    The supplementary groups matter: root's include group root, and keeping
+    them would let a file readable only by that group through.
+    """
+
+    def __init__(self, uid):
+        self.uid = uid
+
+    def __enter__(self):
+        pw = pwd.getpwuid(self.uid)
+        self.saved_groups = os.getgroups()
+        os.setgroups(os.getgrouplist(pw.pw_name, pw.pw_gid))
+        os.setresgid(pw.pw_gid, pw.pw_gid, 0)
+        os.setresuid(self.uid, self.uid, 0)
+
+    def __exit__(self, *_):
+        os.setresuid(0, 0, 0)
+        os.setresgid(0, 0, 0)
+        os.setgroups(self.saved_groups)
+
+
+def read_users_file(path, uid):
+    """The certificate or key, read with the caller's privileges only.
+
+    Not a symlink, a regular file, owned by the caller, and bounded — so it
+    can be neither a root file, nor someone else's, nor a device.
+    """
+    with AsCaller(uid):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError as exc:
+            die("cannot read %s: %s" % (path, exc.strerror))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                die("%s is not a regular file" % path)
+            if st.st_uid != uid:
+                die("%s is not owned by you" % path)
+            data = b""
+            while len(data) <= MAX_FILE_BYTES:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                data += chunk
+            if len(data) > MAX_FILE_BYTES:
+                die("%s is larger than %d bytes" % (path, MAX_FILE_BYTES))
+            return data
+        finally:
+            os.close(fd)
+
+
+def fresh_run_dir():
+    """An empty, root-only directory for this tunnel's copies."""
+    if os.path.lexists(RUN_DIR):
+        if not trusted(RUN_DIR, True):
+            die("%s exists and is not a root-owned directory" % RUN_DIR)
+        shutil.rmtree(RUN_DIR)
+    os.mkdir(RUN_DIR, 0o700)
+    os.chmod(RUN_DIR, 0o700)
+
+
+def write_copy(name, data):
+    path = os.path.join(RUN_DIR, name)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    return path
+
+
+def gpclient_argv(host, entry, cert_copy, key_copy, use_wrapper):
+    """The only command line this helper ever runs gpclient with."""
+    argv = [GPCLIENT, "connect"]
+    if entry.get("gateway") is True:
+        argv.append("--as-gateway")
+    argv += ["--user=" + entry["user"], "--passwd-on-stdin"]
+    if cert_copy:
+        argv += ["--certificate=" + cert_copy]
+    if key_copy:
+        argv += ["--sslkey=" + key_copy]
+    if use_wrapper:
+        argv += ["--script=" + DNS_WRAPPER]
+    return argv + ["--", host]
+
+
+def cmd_connect(args):
+    if len(args) != 1:
+        die("usage: connect <host> (portal password on stdin)")
+    host = args[0]
+    if not HOST_RE.match(host):
+        die("invalid portal host: %r" % host)
+    uid = caller_uid()
+    if uid is None:
+        die("connect must come through pkexec from the user who approved the portal")
+
+    portals = load_approved()
+    if host not in portals:
+        die("portal %s is not approved — run: sudo multivpn-gp-approve approve %s" % (host, host), 3)
+    entry = check_entry(host, portals[host])
+    if entry["owner"] != uid:
+        die("portal %s was approved for another user" % host)
+
+    fresh_run_dir()
+    cert_copy = key_copy = ""
+    for field in ("cert", "key"):
+        path = entry.get(field, "")
+        if path:
+            data = read_users_file(path, uid)
+            ext = os.path.splitext(path)[1].lower()
+            copy = write_copy(field + ext, data)
+            if field == "cert":
+                cert_copy = copy
+            else:
+                key_copy = copy
+
+    dns = entry.get("dns", "")
+    use_wrapper = bool(dns) and trusted(os.path.dirname(DNS_WRAPPER), True) and trusted(DNS_WRAPPER, False)
+    if dns and not use_wrapper:
+        print("multivpn-gp: %s is missing, connecting without DNS domains" % DNS_WRAPPER,
+              file=sys.stderr)
+
+    # A clean environment: pkexec already dropped the caller's, and nothing
+    # here should depend on root's either.
+    env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin", "LANG": "C.UTF-8"}
+    if use_wrapper:
+        env["GP_DNS_DOMAINS"] = dns
+
+    # exec rather than a child: gpclient keeps the tunnel for its whole life,
+    # finds itself again for `disconnect` through its own lock file, and
+    # reads the password from the stdin this process was given.
+    os.execve(GPCLIENT, gpclient_argv(host, entry, cert_copy, key_copy, use_wrapper), env)
+
+
+def cmd_disconnect(args):
+    if args:
+        die("usage: disconnect")
+    result = subprocess.run([GPCLIENT, "disconnect"], stdin=subprocess.DEVNULL)
+    if os.path.lexists(RUN_DIR) and trusted(RUN_DIR, True):
+        shutil.rmtree(RUN_DIR, ignore_errors=True)
+    return result.returncode
+
+
+COMMANDS = {"connect": cmd_connect, "disconnect": cmd_disconnect}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if sys.argv[1] == "--version":
+        print(VERSION)
+        return 0
+    command = sys.argv[1]
+    if command not in COMMANDS:
+        die("unknown command: %s" % command, 2)
+    require_root()
+    return COMMANDS[command](sys.argv[2:]) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

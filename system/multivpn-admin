@@ -123,8 +123,12 @@ def read_as_caller(path):
         with open(path, "rb") as fh:
             return bounded(fh)
 
-    gid = pwd.getpwuid(uid).pw_gid
-    os.setresgid(gid, gid, 0)
+    # The supplementary groups too: root's include group root, and keeping them
+    # let a file readable only by that group (/etc/sudoers, say) through.
+    pw = pwd.getpwuid(uid)
+    saved_groups = os.getgroups()
+    os.setgroups(os.getgrouplist(pw.pw_name, pw.pw_gid))
+    os.setresgid(pw.pw_gid, pw.pw_gid, 0)
     os.setresuid(uid, uid, 0)
     try:
         with open(path, "rb") as fh:
@@ -132,6 +136,7 @@ def read_as_caller(path):
     finally:
         os.setresuid(0, 0, 0)
         os.setresgid(0, 0, 0)
+        os.setgroups(saved_groups)
 
 
 def group_id(name, fallback=0):
