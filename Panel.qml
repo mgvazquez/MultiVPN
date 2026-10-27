@@ -52,6 +52,8 @@ Panel {
   property string portalUser: ""
   // Which portal is waiting for its password. The value is never kept.
   property string gpPasswordHost: ""
+  // Whether that password goes to the keyring once it has connected.
+  property bool gpRemember: false
   property string portalCert: ""
   property string portalKey: ""
   property bool portalGateway: false
@@ -156,6 +158,7 @@ Panel {
     importKind = ""
     importTarget = ""
     gpPasswordHost = ""
+    gpRemember = false
     portalHost = ""
     portalUser = ""
     portalCert = ""
@@ -1347,6 +1350,19 @@ Panel {
               foreground: root.foreground
               onAccepted: gpConnectButton.clicked()
             }
+            // Saved only after the tunnel is up, so a typo is never kept. The
+            // next connect then skips this form; a rejected password brings it
+            // back.
+            Button {
+              visible: vpn.hasKeyring
+              text: "Remember password"
+              bordered: true
+              selected: root.gpRemember
+              tooltipText: "Kept in the session keyring"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.gpRemember = !root.gpRemember
+            }
             Row {
               spacing: Style.spacing.controlGap
               Button {
@@ -1359,9 +1375,11 @@ Panel {
                 onClicked: {
                   var host = root.gpPasswordHost
                   var pass = gpPassField.text
+                  var mode = vpn.hasKeyring && root.gpRemember ? "typed+remember" : "typed"
                   gpPassField.text = ""
                   root.gpPasswordHost = ""
-                  vpn.connectGpPortal(host, pass)
+                  root.gpRemember = false
+                  vpn.connectGpPortal(host, pass, mode)
                 }
               }
               Button {
@@ -1546,6 +1564,11 @@ Panel {
     readonly property bool isActive: profile && profile.state === "active"
     readonly property bool isFocused: isActive && vpn.activeConnections.length > 1
                                       && vpn.connectionKey(profile) === vpn.connectionKey(vpn.focused)
+    // A GlobalProtect portal with a password in the keyring. Its key button
+    // forgets it — the only way to, short of removing the portal, since a
+    // saved password means the form that would offer it never opens.
+    readonly property bool canForget: !!profile && profile.backend === "globalprotect"
+                                      && vpn.hasKeyring && vpn.gpSaved[profile.name] === true
 
     signal activated()
     signal autostartToggled()
@@ -1630,14 +1653,16 @@ Panel {
       }
       PanelActionButton {
         // NM OpenVPN secrets live in NetworkManager, not the helper.
-        opacity: row.rowCaps.canCredentials && row.profile && row.profile.origin !== "nm" ? 1 : 0
-        enabled: row.rowCaps.canCredentials && row.profile && row.profile.origin !== "nm"
+        readonly property bool canSet: row.rowCaps.canCredentials && !!row.profile
+                                       && row.profile.origin !== "nm"
+        opacity: canSet || row.canForget ? 1 : 0
+        enabled: canSet || row.canForget
         iconText: "󰌆"
-        tooltipText: "Set credentials"
-        foreground: row.profile && row.profile.hasAuth ? root.foreground : root.dim
-        hoverColor: root.foreground
+        tooltipText: row.canForget ? "Forget saved password" : "Set credentials"
+        foreground: row.canForget || (row.profile && row.profile.hasAuth) ? root.foreground : root.dim
+        hoverColor: row.canForget ? root.urgent : root.foreground
         fontFamily: root.fontFamily
-        onClicked: row.credentialsRequested()
+        onClicked: row.canForget ? vpn.forgetGpPassword(row.profile.name) : row.credentialsRequested()
       }
       PanelActionButton {
         iconText: "󰩹"

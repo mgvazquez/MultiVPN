@@ -467,7 +467,8 @@ function availabilityScript() {
     'done;',
     'printf "nmopenvpn=%s\\n" "$plug";',
     'printf "globalprotect=%s\\n" "$(have gpclient)";',
-    'printf "zenity=%s\\n" "$(have zenity)"'
+    'printf "zenity=%s\\n" "$(have zenity)";',
+    'printf "secrettool=%s\\n" "$(have secret-tool)"'
   ].join(" "))
 }
 
@@ -860,6 +861,33 @@ function gpArgs(raw, dnsWrapper, stdinPassword) {
   return a
 }
 
+// A remembered portal password lives in the session keyring (Secret Service,
+// gnome-keyring on Omarchy), keyed by portal and user. Only the scripts below
+// read or write it, so the stored value never passes through the panel.
+function gpSecretAttrs(raw) {
+  var e = portalEntry(raw)
+  if (!e) return ""
+  return "service multivpn backend globalprotect host " + shellQuote(e.host)
+       + " user " + shellQuote(e.user)
+}
+
+// `host=1` for every portal with a stored password. Only portals with a user
+// connect from the panel, so only those can have one. The values themselves
+// go nowhere.
+function gpSecretListScript(portals) {
+  var checks = []
+  for (var i = 0; i < (portals || []).length; i++) {
+    var e = portalEntry(portals[i])
+    if (!e || e.user === "") continue
+    checks.push('if timeout 5 secret-tool lookup ' + gpSecretAttrs(e) + ' >/dev/null 2>&1; then'
+              + ' printf "%s=1\\n" ' + shellQuote(e.host) + '; fi;')
+  }
+  return capped(checks.join(" ") + " exit 0")
+}
+
+function gpSecretClearScript(raw) {
+  return capped('timeout 5 secret-tool clear ' + gpSecretAttrs(raw) + ' 2>/dev/null; exit 0')
+}
 
 // Which kind of config the user just picked, so import does not need the user
 // to know. Checked on the head of the file only — inline certificates make
@@ -904,17 +932,35 @@ function nmImportScript(path, name, kind) {
 // The tunnel is left running detached with its output appended to a log. The
 // script returns as soon as gpclient is up or has failed, so the panel can say
 // which without waiting out the session.
-function gpConnectScript(raw, dnsWrapper, logPath) {
+//
+// `mode` says where the portal password comes from: "typed" reads it from
+// stdin, "typed+remember" does the same and saves it to the keyring once the
+// tunnel is up, "stored" takes it from the keyring. Exit 2 means the password
+// was turned down, exit 3 that nothing was stored. A stored password that is
+// turned down is cleared on the spot, so the next attempt asks again.
+function gpConnectScript(raw, dnsWrapper, logPath, mode) {
   var e = portalEntry(raw)
   if (!e) return "exit 1"
   var args = gpArgs(raw, dnsWrapper, true)
   var log = shellQuote(logPath)
+  var attrs = gpSecretAttrs(raw)
+  var stored = mode === "stored"
+  var remember = mode === "typed+remember"
 
   return capped([
-    'read -r pass || true;',
+    stored
+      ? 'pass=$(timeout 5 secret-tool lookup ' + attrs + ' 2>/dev/null);'
+        + ' [ -n "$pass" ] || { echo "no stored password" >&2; exit 3; };'
+      : 'read -r pass || true;',
     'mkdir -p "$(dirname ' + log + ')" || exit 1;',
     'umask 077;',
     '{ printf "\n==== %s %s ====\n" "$(date "+%F %T")" ' + shellQuote(e.host) + '; } >> ' + log + ';',
+    // Only this attempt's part of the log counts. The log is appended across
+    // attempts, so matching the whole file would take an earlier session's
+    // "Connected to VPN" for this one — and remember a password nothing
+    // verified.
+    'off=$(stat -c %s ' + log + ');',
+    'attempt() { tail -c +$((off + 1)) ' + log + '; };',
     // Detached on purpose: the tunnel outlives this script, and the panel reads
     // the log rather than the pipe.
     //
@@ -931,10 +977,27 @@ function gpConnectScript(raw, dnsWrapper, logPath) {
     // gpclient has no status command to ask.
     'for i in $(seq 1 120); do',
     '  if ! kill -0 "$pid" 2>/dev/null; then',
-    '    tail -n 20 ' + log + ' | grep -iE "error|denied|invalid|failed" | tail -n 3 >&2;',
+    '    attempt | grep -iE "error|denied|invalid|failed" | tail -n 3 >&2;',
+    // What gpclient logs when the portal or gateway turns the password down.
+    // Only WARN/ERROR from the login modules: they log an INFO line on every
+    // attempt, successful ones included. A network failure matches none of
+    // this, so it never costs a stored password.
+    '    if attempt | grep -qE "Invalid username or password|(WARN|ERROR) +gpapi::(gateway|portal)::login"; then',
+    stored ? '      timeout 5 secret-tool clear ' + attrs + ' 2>/dev/null;' : '',
+    '      exit 2;',
+    '    fi;',
     '    exit 1;',
     '  fi;',
-    '  if grep -q "Connected to VPN" ' + log + ' 2>/dev/null; then exit 0; fi;',
+    '  if attempt | grep -q "Connected to VPN"; then',
+    // Saved only now, so a mistyped password is never remembered. Failing to
+    // save is reported but does not undo a tunnel that is up.
+    remember
+      ? '    printf "%s" "$pass" | timeout 5 secret-tool store --label='
+        + shellQuote("MultiVPN GlobalProtect " + (e.user ? e.user + "@" : "") + e.host)
+        + ' ' + attrs + ' || echo "could not save the password to the keyring" >&2;'
+      : '',
+    '    exit 0;',
+    '  fi;',
     '  sleep 1;',
     'done;',
     'echo "timed out waiting for the tunnel" >&2;',

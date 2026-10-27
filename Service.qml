@@ -77,6 +77,7 @@ Item {
   property string detailIdentity: ""
   readonly property string availabilityLabel: Model.availabilityLabel(availability)
   readonly property bool hasFilePicker: availability.zenity === "1"
+  readonly property bool hasKeyring: availability.secrettool === "1"
 
   // For OpenVPN and WireGuard this is a profile/interface name; for
   // GlobalProtect it is the portal server.
@@ -347,7 +348,11 @@ Item {
       actionFinished("launch", true, "opening GlobalProtect")
       return
     }
-    if (gpCanRunHere(portal)) { passwordNeeded(portal); return }
+    if (gpCanRunHere(portal)) {
+      if (hasKeyring && gpSaved[portal]) connectGpPortal(portal, "", "stored")
+      else passwordNeeded(portal)
+      return
+    }
     if (!bar) return
     var inner = Model.gpConnectCommand(portalFor(portal), dnsWrapper)
     if (!inner) return
@@ -356,8 +361,10 @@ Item {
   }
 
   // The password is written to the script's stdin, never passed as an
-  // argument, so it is not in /proc for the life of the connection.
-  function connectGpPortal(portal, password) {
+  // argument, so it is not in /proc for the life of the connection. A stored
+  // one is read by the script itself and never comes through here at all.
+  // `mode` is "typed", "typed+remember" or "stored" — see gpConnectScript.
+  function connectGpPortal(portal, password, mode) {
     var entry = portalFor(portal)
     if (!entry) return
     intent = "up"
@@ -366,10 +373,32 @@ Item {
     lastAttemptFailed = false
     lastAttemptName = portal
     lastAttemptOrigin = "process"
-    gpConnect.secret = password + "\n"
+    gpConnect.mode = mode || "typed"
+    gpConnect.secret = gpConnect.mode === "stored" ? "" : password + "\n"
     gpConnect.command = ["bash", "-lc",
-                         Model.gpConnectScript(entry, dnsWrapper, gpLogPath)]
+                         Model.gpConnectScript(entry, dnsWrapper, gpLogPath, gpConnect.mode)]
     gpConnect.running = true
+  }
+
+  // Which portals have a password in the keyring, as { host: true }. Only
+  // presence is known here, never the value.
+  property var gpSaved: ({})
+
+  function refreshGpSaved() {
+    if (!hasKeyring) { gpSaved = ({}); return }
+    gpSecretList.command = ["bash", "-lc", Model.gpSecretListScript(portals)]
+    gpSecretList.running = true
+  }
+
+  onPortalsChanged: refreshGpSaved()
+  onHasKeyringChanged: refreshGpSaved()
+
+  function forgetGpPassword(portal) {
+    var entry = portalFor(portal)
+    if (!entry) return
+    gpSecretClear.label = "forget"
+    gpSecretClear.command = ["bash", "-lc", Model.gpSecretClearScript(entry)]
+    gpSecretClear.running = true
   }
 
   // openvpn3's session-start is not a plain run-to-completion command: a
@@ -480,6 +509,13 @@ Item {
   }
 
   function removePortal(name) {
+    // The password goes with the portal, rather than lingering in the keyring
+    // under a host nothing refers to any more.
+    if (hasKeyring && gpSaved[name]) {
+      gpSecretClear.label = "portal-removed"
+      gpSecretClear.command = ["bash", "-lc", Model.gpSecretClearScript(portalFor(name))]
+      gpSecretClear.running = true
+    }
     savePortals(portals.filter(function(p) {
       return Model.portalHost(p) !== name
     }), "remove")
@@ -938,6 +974,7 @@ Item {
   Process {
     id: gpConnect
     property string secret: ""
+    property string mode: "typed"
     stdinEnabled: true
     stderr: StdioCollector { waitForEnd: true }
     onStarted: { write(secret); secret = "" }
@@ -945,18 +982,52 @@ Item {
       root.intent = ""
       root.actionStatus = ""
       root.refresh()
+      var why = Model.clamp(stderr.text, Model.MAX_FIELD).trim()
+      if (mode !== "typed") root.refreshGpSaved()
       if (code === 0) {
-        root.lastError = ""
+        // Up either way; a password that could not be saved is the only thing
+        // worth saying.
+        root.lastError = /keyring/.test(why) ? "Connected, but " + why : ""
         root.actionFinished("launch", true, "connected")
+      } else if (mode === "stored" && (code === 2 || code === 3)) {
+        // The script already cleared a rejected password. Asking again is the
+        // whole recovery.
+        root.lastError = code === 2 ? "The saved password was rejected — enter it again"
+                                    : "No saved password — enter it"
+        root.passwordNeeded(root.lastAttemptName)
+        root.actionFinished("launch", false, "password needed")
       } else {
         root.lastAttemptFailed = true
         // The script forwards the log lines that look like the reason; the log
         // itself keeps the rest.
-        var why = Model.clamp(stderr.text, Model.MAX_FIELD).trim()
         root.lastError = "Connection failed" + (why ? ": " + why : "")
                        + " — see " + root.gpLogPath
         root.actionFinished("launch", false, "connection failed")
       }
+    }
+  }
+
+  Process {
+    id: gpSecretList
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var kv = Model.parseKeyValues(text)
+        var saved = {}
+        for (var host in kv) saved[host] = kv[host] === "1"
+        root.gpSaved = saved
+      }
+    }
+  }
+
+  Process {
+    id: gpSecretClear
+    property string label: "forget"
+    onExited: function(code) {
+      root.refreshGpSaved()
+      if (label === "forget")
+        root.actionFinished("forget", code === 0, code === 0 ? "password forgotten"
+                                                             : "could not forget the password")
     }
   }
 

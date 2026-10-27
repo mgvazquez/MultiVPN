@@ -96,12 +96,25 @@ kann trennen, und reicht das Verbinden an ein Terminal oder die Hersteller-GUI
 weiter. Alles, was am Tunnel-Interface hängt — Adresse, Routen, Laufzeit,
 Durchsatz — funktioniert für alle vier gleich.
 
+Für ein Portal mit Benutzer fragt das Panel das Passwort selbst ab.
+**Remember password** legt es im Schlüsselbund der Sitzung ab (Secret Service —
+unter Omarchy gnome-keyring, über `secret-tool`). Gespeichert wird erst, wenn
+der Tunnel steht, ein Tippfehler bleibt also nie hängen; danach verbindet das
+Portal ohne Formular. Polkit fragt weiterhin nach deinem eigenen Passwort, weil
+das den Tunnel baut. Lehnt das Portal ein gespeichertes Passwort ab, wird es
+gelöscht und das Formular kommt zurück. Der Schlüssel-Button in der Zeile des
+Portals vergisst es, Entfernen des Portals ebenso. Omarchys
+Standard-Schlüsselbund entsperrt sich beim Login, weil er unverschlüsselt auf
+der Platte liegt (`0600`) — geschützt ist er dort nur durch die
+Festplattenverschlüsselung, und jeder Prozess deines Benutzers kann ihn über
+D-Bus lesen.
+
 ## Voraussetzungen
 
 Je nach Backend `openvpn`, `openvpn3` (openvpn3-linux), `wireguard-tools`
 (für `wg-quick@`), NetworkManager ab 1.16 (für WireGuard-Verbindungen),
 `networkmanager-openvpn` (für OpenVPN-Verbindungen in NetworkManager) oder
-`globalprotect-openconnect`. Dazu `bash`, `systemctl`, `ip`, `journalctl`. Für den Dateidialog `zenity`, für die Profilverwaltung zusätzlich
+`globalprotect-openconnect`. Dazu `bash`, `systemctl`, `ip`, `journalctl`. Für den Dateidialog `zenity`, zum Merken von GlobalProtect-Passwörtern optional `secret-tool` (libsecret), für die Profilverwaltung zusätzlich
 `pkexec` und `python3`. Server und Cipher kommen aus dem Journal — ohne
 Leserechte darauf steht dort schlicht `—`.
 

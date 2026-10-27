@@ -95,6 +95,19 @@ raises the polkit dialog for root, and the tunnel runs detached with its output
 appended to `~/.local/state/multivpn/gpclient.log`. Neither password is ever an
 argument, so neither appears in `/proc`.
 
+**Remember password** under the password field keeps the portal password in
+the session keyring (Secret Service — gnome-keyring on Omarchy, via
+`secret-tool`). It is saved only once the tunnel is up, so a typo is never
+kept, and from then on connecting skips the form; polkit still asks for your
+own password, since that one makes the tunnel. A saved password the portal
+turns down is cleared and the form comes back. The key button on the portal's
+row forgets it, and removing the portal does too. Only the connect script
+reads or writes the keyring — the saved value never passes through the panel.
+Omarchy's default keyring unlocks itself at login because it is stored
+unencrypted on disk, readable by your user only (`0600`); full-disk encryption
+is what protects it at rest, and any process running as you can read it over
+D-Bus.
+
 A portal without a user may be asked anything — a user, a challenge, a browser
 login — so that one still hands off to a terminal or the vendor GUI.
 
@@ -117,6 +130,7 @@ throughput — works the same for all four.
 | `bash`, `systemctl`, `ip`, `journalctl`, `cat` | reading status, addresses, routes and the connection log |
 | membership in a group that can read the system journal (usually `wheel`) | server endpoint and cipher come from the journal |
 | `zenity` | the file dialog for importing a config — optional, the path can also be pasted |
+| `secret-tool` (libsecret) and a Secret Service keyring | remembering GlobalProtect passwords — optional, the toggle is hidden without it |
 | `pkexec` and `python3` | only for profile management, see below |
 
 Reading the journal is optional in practice: without it the panel simply shows
@@ -240,6 +254,7 @@ uptime, throughput) attach to that row like any other.
 | NetworkManager | WireGuard and OpenVPN connections, read live via `nmcli` |
 | openvpn3 configuration manager | OpenVPN 3 configs, read live via `openvpn3 configs-list` |
 | `~/.local/state/multivpn/portals.json` | GlobalProtect portals, owned by you, plain host names |
+| session keyring (`service=multivpn backend=globalprotect host=… user=…`) | remembered GlobalProtect passwords |
 
 `gpclient` redacts host names in its own log, so the portal a tunnel belongs to
 is read from the widget's own log instead, where the connect script records it
